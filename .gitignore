@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+.env
+.env.*
+!.env.example
+
+logs/*
+!logs/.gitkeep
+
+# Sesi WhatsApp OpenWA (token autentikasi)
+_IGNORE_*
+commits/
