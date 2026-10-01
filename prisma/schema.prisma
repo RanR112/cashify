@@ -1,0 +1,308 @@
+// Skema Cashify. Sumber: claude/ARCHITECTURE.md Bagian 9-10.
+//
+// Aturan yang berlaku di seluruh berkas ini:
+// - Uang adalah Int rupiah penuh (LOCAL-MODE.md). Tidak ada Float atau Decimal.
+// - Semua timestamp TIMESTAMPTZ (UTC); konversi ke Asia/Jakarta di lapisan aplikasi.
+// - Skema `auth` milik Supabase TIDAK dipetakan di sini (BACKEND-STRUCTURE.md 4.4).
+//   FK users.id -> auth.users(id) ada di migrasi manual `link_users_to_auth`.
+// - Yang tidak bisa diekspresikan Prisma (partial index, CHECK, generated column,
+//   RLS, publication Realtime) ada di migrasi SQL di prisma/migrations/.
+// - Skema hanya berubah lewat `prisma migrate`, tidak pernah lewat dashboard Supabase.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooler 6543, untuk runtime
+  directUrl = env("DIRECT_URL") // langsung 5432, untuk migrasi
+}
+
+/// Memperluas auth.users milik Supabase. Kredensial ada di Supabase Auth, bukan di sini.
+model User {
+  id                    String    @id @db.Uuid // sama dengan auth.users.id, tanpa default
+  fullName              String    @map("full_name") @db.VarChar(100)
+  avatarUrl             String?   @map("avatar_url")
+  initialBalance        Int       @default(0) @map("initial_balance")
+  currency              String    @default("IDR") @db.Char(3)
+  timezone              String    @default("Asia/Jakarta") @db.VarChar(50)
+  locale                String    @default("id-ID") @db.VarChar(10)
+  onboardingCompletedAt DateTime? @map("onboarding_completed_at") @db.Timestamptz(6)
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt             DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  whatsappAccounts      WhatsappAccount[]
+  whatsappVerifications WhatsappVerification[]
+  accounts              Account[]
+  categories            Category[]
+  transactions          Transaction[]
+  budgets               Budget[]
+  recurringTransactions RecurringTransaction[]
+  notifications         Notification[]
+  messageLogs           MessageLog[]
+  auditLogs             AuditLog[]
+
+  @@map("users")
+}
+
+/// Satu pengguna, satu nomor WhatsApp. Partial unique index ada di migrasi
+/// `add_constraints_and_partial_indexes`:
+///   phone_e164 WHERE status = 'verified'
+///   wa_chat_id WHERE status = 'verified'
+///   user_id    WHERE status <> 'disabled'
+model WhatsappAccount {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId              String    @map("user_id") @db.Uuid
+  phoneE164           String    @map("phone_e164") @db.VarChar(20) // +628123456789
+  waChatId            String    @map("wa_chat_id") @db.VarChar(64) // 628123456789@c.us
+  status              String    @db.VarChar(20) // pending | verified | disabled
+  verifiedAt          DateTime? @map("verified_at") @db.Timestamptz(6)
+  lastMessageAt       DateTime? @map("last_message_at") @db.Timestamptz(6)
+  dailySummaryEnabled Boolean   @default(false) @map("daily_summary_enabled")
+  budgetAlertEnabled  Boolean   @default(false) @map("budget_alert_enabled")
+  createdAt           DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("whatsapp_accounts")
+}
+
+model WhatsappVerification {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  phoneE164  String    @map("phone_e164") @db.VarChar(20)
+  codeHash   String    @map("code_hash") @db.VarChar(255) // hash bcrypt, bukan kode polos
+  attempts   Int       @default(0) @db.SmallInt // maksimal 5
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("whatsapp_verifications")
+}
+
+/// Sesi bot milik sistem, bukan milik pengguna. Sengaja tidak terhubung ke users.
+model WhatsappSession {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sessionId       String    @unique @map("session_id") @db.VarChar(64) // cocok dengan --session-id OpenWA
+  phoneE164       String?   @map("phone_e164") @db.VarChar(20)
+  status          String    @db.VarChar(20) // connected | disconnected | qr_pending
+  lastConnectedAt DateTime? @map("last_connected_at") @db.Timestamptz(6)
+  lastError       String?   @map("last_error")
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("whatsapp_sessions")
+}
+
+model Account {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  name      String    @db.VarChar(50)
+  type      String    @db.VarChar(20) // cash | bank | ewallet
+  isDefault Boolean   @default(false) @map("is_default")
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions          Transaction[]
+  recurringTransactions RecurringTransaction[]
+
+  @@index([userId, deletedAt])
+  @@map("accounts")
+}
+
+/// user_id NULL berarti kategori sistem. Unique (user_id, slug) tidak mencegah slug
+/// sistem ganda karena NULL dianggap berbeda di PostgreSQL; partial unique
+/// `categories_system_slug_key` di migrasi manual yang menutup celah itu.
+model Category {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String?   @map("user_id") @db.Uuid
+  name      String    @db.VarChar(50)
+  slug      String    @db.VarChar(50) // dipakai parser
+  type      String    @db.VarChar(10) // income | expense
+  icon      String    @db.VarChar(50)
+  color     String    @db.Char(7) // hex
+  keywords  String[] // kata kunci pencocokan parser
+  sortOrder Int       @default(0) @map("sort_order") @db.SmallInt
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user                  User?                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions          Transaction[]
+  budgetCategories      BudgetCategory[]
+  recurringTransactions RecurringTransaction[]
+
+  @@unique([userId, slug])
+  @@index([userId, type])
+  @@map("categories")
+}
+
+/// `date` adalah generated column di database:
+///   GENERATED ALWAYS AS ((occurred_at AT TIME ZONE 'Asia/Jakarta')::date) STORED
+/// Prisma tidak mengenal generated column, jadi dideklarasikan dengan default
+/// sehingga tidak pernah ikut di INSERT/UPDATE dan hanya dibaca. Jangan diisi manual.
+/// CHECK (amount > 0) dan dua partial index (user_id, date DESC) dan
+/// (user_id, created_at DESC), keduanya WHERE deleted_at IS NULL, ada di migrasi manual.
+model Transaction {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  accountId       String    @map("account_id") @db.Uuid
+  categoryId      String    @map("category_id") @db.Uuid
+  type            String    @db.VarChar(10) // income | expense; tipe ditentukan kolom ini, bukan tanda nominal
+  amount          Int // rupiah penuh, harus positif
+  occurredAt      DateTime  @map("occurred_at") @db.Timestamptz(6)
+  date            DateTime  @default(dbgenerated()) @db.Date
+  description     String?   @db.VarChar(255)
+  source          String    @db.VarChar(20) // manual | whatsapp | recurring | import
+  sourceMessageId String?   @map("source_message_id") @db.Uuid
+  receiptUrl      String?   @map("receipt_url")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account       Account     @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  category      Category    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  sourceMessage MessageLog? @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+
+  @@index([userId, categoryId, date])
+  @@index([sourceMessageId])
+  @@map("transactions")
+}
+
+model Budget {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  name            String?   @db.VarChar(100)
+  periodType      String    @map("period_type") @db.VarChar(10) // monthly | weekly
+  periodStart     DateTime  @map("period_start") @db.Date
+  periodEnd       DateTime  @map("period_end") @db.Date
+  totalAmount     Int       @map("total_amount")
+  autoRenew       Boolean   @default(true) @map("auto_renew")
+  rolloverEnabled Boolean   @default(false) @map("rollover_enabled")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz(6)
+
+  user             User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  budgetCategories BudgetCategory[]
+
+  @@index([userId, periodStart, periodEnd])
+  @@map("budgets")
+}
+
+model BudgetCategory {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  budgetId       String    @map("budget_id") @db.Uuid
+  categoryId     String    @map("category_id") @db.Uuid
+  amount         Int // alokasi untuk kategori ini
+  alertThreshold Int       @default(80) @map("alert_threshold") @db.SmallInt // persen
+  alertSentAt    DateTime? @map("alert_sent_at") @db.Timestamptz(6) // mencegah peringatan berulang
+
+  budget   Budget   @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@unique([budgetId, categoryId])
+  @@map("budget_categories")
+}
+
+/// Fondasi idempotency webhook: UNIQUE (session_id, wa_message_id).
+/// session_id sengaja bukan FK ke whatsapp_sessions: penyimpanan pesan mentah tidak
+/// boleh gagal hanya karena baris sesi belum ada (aturan 4, controller webhook < 100 ms).
+/// raw_payload berisi data pribadi; kebijakan retensi 30 hari lewat cron.
+model MessageLog {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId        String?   @map("user_id") @db.Uuid // NULL jika pengirim tidak dikenal
+  sessionId     String    @map("session_id") @db.VarChar(64)
+  waMessageId   String    @map("wa_message_id") @db.VarChar(128)
+  waChatId      String    @map("wa_chat_id") @db.VarChar(64)
+  direction     String    @db.VarChar(10) // inbound | outbound
+  body          String?
+  messageType   String    @map("message_type") @db.VarChar(20) // chat | image | ptt
+  rawPayload    Json?     @map("raw_payload") @db.JsonB
+  intent        String?   @db.VarChar(30)
+  parseResult   Json?     @map("parse_result") @db.JsonB
+  status        String    @db.VarChar(20) // received | processed | failed | ignored
+  error         String?
+  correlationId String?   @map("correlation_id") @db.VarChar(64)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  processedAt   DateTime? @map("processed_at") @db.Timestamptz(6)
+
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  transactions Transaction[]
+
+  @@unique([sessionId, waMessageId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@map("message_logs")
+}
+
+model RecurringTransaction {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  accountId   String    @map("account_id") @db.Uuid
+  categoryId  String    @map("category_id") @db.Uuid
+  type        String    @db.VarChar(10) // income | expense
+  amount      Int
+  description String?   @db.VarChar(255)
+  frequency   String    @db.VarChar(20) // daily | weekly | monthly | yearly
+  dayOfMonth  Int?      @map("day_of_month") @db.SmallInt // 1-31
+  dayOfWeek   Int?      @map("day_of_week") @db.SmallInt // 0-6
+  startDate   DateTime  @map("start_date") @db.Date
+  endDate     DateTime? @map("end_date") @db.Date // NULL berarti tanpa batas
+  nextRunDate DateTime  @map("next_run_date") @db.Date
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account  Account  @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([nextRunDate, isActive])
+  @@map("recurring_transactions")
+}
+
+model Notification {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String    @map("user_id") @db.Uuid
+  type         String    @db.VarChar(30) // budget_alert | daily_summary
+  channel      String    @db.VarChar(20) // whatsapp | push | in_app
+  title        String    @db.VarChar(150)
+  body         String
+  payload      Json?     @db.JsonB
+  status       String    @db.VarChar(20) // pending | sent | failed | read
+  scheduledFor DateTime? @map("scheduled_for") @db.Timestamptz(6)
+  sentAt       DateTime? @map("sent_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, scheduledFor])
+  @@map("notifications")
+}
+
+/// BIGSERIAL disengaja (berbeda dari tabel lain): tidak pernah terekspos ke pengguna,
+/// dan celah dalam rangkaian ID membantu mendeteksi manipulasi. Satu-satunya BigInt
+/// di skema ini; tidak pernah masuk response API.
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  userId     String?  @map("user_id") @db.Uuid
+  entityType String   @map("entity_type") @db.VarChar(50) // transaction | budget
+  entityId   String   @map("entity_id") @db.Uuid
+  action     String   @db.VarChar(20) // create | update | delete | restore
+  changes    Json?    @db.JsonB
+  actorType  String   @map("actor_type") @db.VarChar(20) // user | system | whatsapp
+  ipAddress  String?  @map("ip_address") @db.Inet
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
