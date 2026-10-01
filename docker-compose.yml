@@ -1,0 +1,23 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+  # Hanya untuk test integrasi: Postgres polos dengan stub skema `auth` (tests/db/init-auth-stub.sql).
+  # Data hidup di tmpfs, jadi hilang setiap kontainer dimatikan. Jalankan: docker compose up -d postgres-test
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./tests/db/init-auth-stub.sql:/docker-entrypoint-initdb.d/00-auth-stub.sql:ro
+
+volumes:
+  redis-data:
