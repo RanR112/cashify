@@ -1,0 +1,6 @@
+node_modules
+recordings
+ram-usage.csv
+*.data.json
+_IGNORE_*
+session.data.json

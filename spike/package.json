@@ -1,0 +1,21 @@
+{
+  "name": "openwa-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "openwa": "wa-automate -p 8002 -w http://localhost:3000/webhook",
+    "receiver": "tsx src/receiver.ts",
+    "ram": "tsx src/ram-logger.ts",
+    "reply": "tsx src/send-reply.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-wa/wa-automate": "4.76.0",
+    "@types/express": "5.0.6",
+    "@types/node": "26.6.3",
+    "express": "4.22.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
