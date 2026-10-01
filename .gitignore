@@ -13,3 +13,6 @@ logs/*
 # Sesi WhatsApp OpenWA (token autentikasi)
 _IGNORE_*
 commits/
+claude/
+CLAUDE.md
+PROMPTS.md
