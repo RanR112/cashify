@@ -1,0 +1,38 @@
+# Koleksi REST — Akun (dompet)
+# Salin session.access_token dari respons login (auth.http) ke @token.
+# @tokenB = token pengguna KEDUA (daftarkan akun lain di auth.http), untuk uji isolasi.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+@tokenB = GANTI_DENGAN_ACCESS_TOKEN_PENGGUNA_KEDUA
+@idPenggunaB = GANTI_DENGAN_ID_PENGGUNA_KEDUA
+
+### ============================================================
+### GET /accounts
+### ============================================================
+
+# Sukses: 200 {data[]}; minimal berisi akun default "Tunai" (is_default true, tampil pertama)
+GET {{baseUrl}}/accounts
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/accounts
+
+### Error 401: token ngawur
+GET {{baseUrl}}/accounts
+Authorization: Bearer token-ngawur
+
+### ============================================================
+### Isolasi antar-pengguna (aturan 8)
+### ============================================================
+
+# Jalankan dengan token A. user_id di query dan header X-User-Id DIABAIKAN:
+# hasilnya tetap akun milik pemilik token. Bandingkan id akun dengan hasil token B di bawah;
+# tidak boleh ada id yang sama.
+GET {{baseUrl}}/accounts?user_id={{idPenggunaB}}&userId={{idPenggunaB}}
+Authorization: Bearer {{token}}
+X-User-Id: {{idPenggunaB}}
+
+### Akun milik B, dilihat dengan token B
+GET {{baseUrl}}/accounts
+Authorization: Bearer {{tokenB}}

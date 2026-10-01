@@ -1,0 +1,12 @@
+# Koleksi REST — Health
+
+@baseUrl = http://localhost:3000
+
+### ============================================================
+### GET /health
+### ============================================================
+
+# Sukses: 200 {"status":"ok"}. Tanpa autentikasi.
+GET {{baseUrl}}/health
+
+### Dokumentasi interaktif ada di {{baseUrl}}/api-docs (UI) dan {{baseUrl}}/api-docs.json (spesifikasi).

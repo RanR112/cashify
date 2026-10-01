@@ -1,0 +1,60 @@
+# Koleksi REST — Kategori
+# Salin session.access_token dari respons login (auth.http) ke @token.
+# @tokenB = token pengguna KEDUA (daftarkan akun lain di auth.http), untuk uji isolasi.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+@tokenB = GANTI_DENGAN_ACCESS_TOKEN_PENGGUNA_KEDUA
+@idPenggunaB = GANTI_DENGAN_ID_PENGGUNA_KEDUA
+
+### ============================================================
+### GET /categories
+### ============================================================
+
+# Sukses: 200 {data[]} berisi 12 kategori (7 pengeluaran, 5 pemasukan).
+# Register menyalin kategori sistem menjadi milik pengguna; kueri mengambil
+# user_id IS NULL OR user_id = <pengguna>, lalu satu slug hanya tampil sekali dan
+# salinan milik pengguna menang, jadi is_system bernilai false untuk pengguna baru.
+GET {{baseUrl}}/categories
+Authorization: Bearer {{token}}
+
+### Sukses: hanya pengeluaran (7)
+GET {{baseUrl}}/categories?type=expense
+Authorization: Bearer {{token}}
+
+### Sukses: hanya pemasukan (5)
+GET {{baseUrl}}/categories?type=income
+Authorization: Bearer {{token}}
+
+### Error 400: type tidak dikenal
+GET {{baseUrl}}/categories?type=transfer
+Authorization: Bearer {{token}}
+
+### Error 400: type berulang
+GET {{baseUrl}}/categories?type=expense&type=income
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/categories
+
+### Error 401: token ngawur
+GET {{baseUrl}}/categories
+Authorization: Bearer token-ngawur
+
+### ============================================================
+### Isolasi antar-pengguna (aturan 8)
+### ============================================================
+
+# Jalankan dengan token A. user_id di query dan header X-User-Id DIABAIKAN:
+# hasilnya tetap kategori milik pemilik token, tidak pernah milik pengguna lain.
+GET {{baseUrl}}/categories?user_id={{idPenggunaB}}
+Authorization: Bearer {{token}}
+X-User-Id: {{idPenggunaB}}
+
+### Kategori kustom B (bila ada) tidak muncul di daftar A, dan sebaliknya
+GET {{baseUrl}}/categories
+Authorization: Bearer {{tokenB}}
+
+### type digabung dengan filter pemilik; tidak memperluas hasil ke pengguna lain
+GET {{baseUrl}}/categories?type=expense&userId={{idPenggunaB}}
+Authorization: Bearer {{token}}

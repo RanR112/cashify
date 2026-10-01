@@ -1,0 +1,98 @@
+# Koleksi REST — Webhook OpenWA
+#
+# Endpoint ini dipanggil OpenWA, bukan klien mobile. Koleksi ini mensimulasikan kiriman OpenWA
+# untuk memeriksa lapisan keamanan dan idempotency.
+#
+# PERINGATAN: bentuk body webhook OpenWA v4 BELUM direkam dari instance nyata (spike P0).
+# Body di bawah hanya tiruan kasar untuk menguji jalur 204/401/idempotency; ganti dengan
+# rekaman asli dari spike/recordings/ begitu tersedia.
+#
+# @webhookSecret harus sama dengan WEBHOOK_SECRET di .env. @webhookPath adalah segmen acak
+# di URL yang didaftarkan ke OpenWA (opsi -w).
+
+@baseUrl = http://localhost:3000
+@webhookSecret = ganti-dengan-rahasia-acak-minimal-16-karakter
+@webhookPath = a7f2k9m3q1
+
+### ============================================================
+### POST /webhooks/openwa/:path
+### ============================================================
+
+# Sukses: 204 (diterima dan disimpan mentah ke message_logs)
+POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+X-Webhook-Secret: {{webhookSecret}}
+Content-Type: application/json
+
+{
+  "event": "onMessage",
+  "sessionId": "cashify-bot",
+  "data": {
+    "id": "false_6281234567890@c.us_3EB0A1B2C3D4E5F60789",
+    "from": "6281234567890@c.us",
+    "fromMe": false,
+    "type": "chat",
+    "body": "tadi makan siang 25 ribu",
+    "t": 1790000000
+  }
+}
+
+### Idempotency: kirim ulang body yang SAMA dengan di atas. Harus tetap 204 dan
+### message_logs tetap satu baris (unique session_id + wa_message_id), tanpa transaksi ganda.
+POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+X-Webhook-Secret: {{webhookSecret}}
+Content-Type: application/json
+
+{
+  "event": "onMessage",
+  "sessionId": "cashify-bot",
+  "data": {
+    "id": "false_6281234567890@c.us_3EB0A1B2C3D4E5F60789",
+    "from": "6281234567890@c.us",
+    "fromMe": false,
+    "type": "chat",
+    "body": "tadi makan siang 25 ribu",
+    "t": 1790000000
+  }
+}
+
+### Aturan 6: fromMe true harus diabaikan. Tetap 204, tidak ada job yang masuk antrean.
+POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+X-Webhook-Secret: {{webhookSecret}}
+Content-Type: application/json
+
+{
+  "event": "onMessage",
+  "sessionId": "cashify-bot",
+  "data": {
+    "id": "true_6281234567890@c.us_3EB0FFFFFFFFFFFFFFFF",
+    "from": "6281234567890@c.us",
+    "fromMe": true,
+    "type": "chat",
+    "body": "Tercatat: makan siang Rp25.000",
+    "t": 1790000005
+  }
+}
+
+### Error 401: rahasia salah
+POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+X-Webhook-Secret: rahasia-yang-salah-sama-sekali
+Content-Type: application/json
+
+{
+  "event": "onMessage"
+}
+
+### Error 401: header rahasia tidak ada
+POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+Content-Type: application/json
+
+{
+  "event": "onMessage"
+}
+
+### Error 400: body bukan JSON yang valid (rahasia benar)
+POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+X-Webhook-Secret: {{webhookSecret}}
+Content-Type: application/json
+
+{ ini bukan json

@@ -1,0 +1,32 @@
+# Koleksi REST — Dashboard
+# Salin session.access_token dari respons login (auth.http) ke @token.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+
+### ============================================================
+### GET /dashboard
+### ============================================================
+
+# Sukses: 200 {balance, month, cashflow[], recent_transactions[]} untuk bulan berjalan
+GET {{baseUrl}}/dashboard
+Authorization: Bearer {{token}}
+
+### Sukses: bulan tertentu
+GET {{baseUrl}}/dashboard?month=2026-09
+Authorization: Bearer {{token}}
+
+### Sukses: bulan tanpa transaksi, semua angka 0, cashflow kosong
+GET {{baseUrl}}/dashboard?month=2020-01
+Authorization: Bearer {{token}}
+
+### Error 400: format bulan salah
+GET {{baseUrl}}/dashboard?month=September-2026
+Authorization: Bearer {{token}}
+
+### Error 400: bulan 13
+GET {{baseUrl}}/dashboard?month=2026-13
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/dashboard

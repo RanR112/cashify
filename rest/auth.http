@@ -1,0 +1,277 @@
+# Koleksi REST — Auth
+#
+# CARA PAKAI (REST Client humao di VS Code: klik "Send Request" di atas tiap blok)
+#   - Variabel @baseUrl di bawah dipakai REST Client. http-client.env.json (env "local")
+#     untuk httpyac/JetBrains; kalau memakainya, hapus baris @baseUrl di tiap berkas.
+#   - Jalankan "register" (sekali), lalu "login". Berkas lain butuh token: salin
+#     session.access_token dari respons login ke baris @token di berkas itu.
+#     Token kedaluwarsa dalam 1 jam; jalankan "refresh" bila perlu.
+#   - Rantai request (`{{login.response.body.$...}}`) memakai sintaks REST Client humao.
+#
+#   - Rate limit (per IP): register 3/jam; login DAN google berbagi 5 per 15 menit. Bila
+#     kena 429, tunggu `Retry-After` atau restart `npm run dev` (penyimpanan di memori).
+
+@baseUrl = http://localhost:3000
+
+### ============================================================
+### POST /auth/register
+### ============================================================
+
+# Sukses: 201 {user, session}
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "dey@example.com",
+  "password": "rahasia-banget-123",
+  "full_name": "Dey",
+  "initial_balance": 2350000
+}
+
+### Error 409 CONFLICT: email sudah terdaftar (jalankan request di atas dua kali)
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "dey@example.com",
+  "password": "rahasia-banget-123",
+  "full_name": "Dey",
+  "initial_balance": 0
+}
+
+### Error 400: email tidak sah
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "bukan-email",
+  "password": "rahasia-banget-123",
+  "full_name": "Dey"
+}
+
+### Error 400: password kurang dari 8 karakter
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "pendek@example.com",
+  "password": "pendek",
+  "full_name": "Dey"
+}
+
+### Error 400: saldo awal desimal (uang harus bilangan bulat rupiah)
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "desimal@example.com",
+  "password": "rahasia-banget-123",
+  "full_name": "Dey",
+  "initial_balance": 2350000.50
+}
+
+### Error 400: saldo awal negatif, nama terlalu pendek
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "negatif@example.com",
+  "password": "rahasia-banget-123",
+  "full_name": "D",
+  "initial_balance": -1
+}
+
+### ============================================================
+### POST /auth/login
+### ============================================================
+
+# Sukses: 200 {user, session}. Request ini diberi nama supaya request lain bisa memakai tokennya.
+# @name login
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "dey@example.com",
+  "password": "rahasia-banget-123"
+}
+
+### Error 401: password salah
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "dey@example.com",
+  "password": "salah-total"
+}
+
+### Error 400: body kosong
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{}
+
+### ============================================================
+### POST /auth/google
+### ============================================================
+
+# Login atau daftar dengan akun Google lewat ID token (bukan redirect browser).
+# Mobile nanti mendapat id_token dari Google Sign-In native; untuk sekarang dapatkan satu
+# secara manual, sekali saja. Prasyarat (sekali, gratis): OAuth client di Google Cloud
+# Console, lalu Client ID dan Secret dimasukkan ke dashboard Supabase -> Authentication ->
+# Providers -> Google, dengan Client ID yang dipakai di bawah ikut dicantumkan di
+# "Authorized Client IDs".
+#
+# Cara A: Google OAuth Playground (https://developers.google.com/oauthplayground)
+#   1. Klik ikon roda gigi (kanan atas) -> centang "Use your own OAuth credentials", isi
+#      Client ID dan Secret dari Google Cloud Console. Tambahkan
+#      https://developers.google.com/oauthplayground ke "Authorized redirect URIs" client itu.
+#   2. Di Step 1 pilih scope "openid", "email", "profile" (ketik manual di kotak input),
+#      klik "Authorize APIs", pilih akun Google.
+#   3. Di Step 2 klik "Exchange authorization code for tokens". Salin nilai `id_token`
+#      dari respons JSON (bukan access_token).
+#
+# Cara B: alur manual tanpa Playground
+#   1. Buka di browser (ganti CLIENT_ID; redirect_uri harus terdaftar di client itu):
+#      https://accounts.google.com/o/oauth2/v2/auth?client_id=CLIENT_ID&redirect_uri=http://localhost:3000&response_type=code&scope=openid%20email%20profile
+#   2. Setelah persetujuan, salin parameter `code` dari URL tujuan.
+#   3. Tukar kodenya (curl atau request REST Client):
+#      POST https://oauth2.googleapis.com/token
+#      Content-Type: application/x-www-form-urlencoded
+#      code=KODE&client_id=CLIENT_ID&client_secret=SECRET&redirect_uri=http://localhost:3000&grant_type=authorization_code
+#      Salin `id_token` dari responsnya.
+#
+# Catatan: id_token berlaku sekitar 1 jam. Bila Supabase menolak dengan pesan soal nonce
+# atau audience, periksa Client ID di dashboard Supabase.
+#
+# Sukses: 200 {user, session}. Login pertama membuat akun "Tunai" dan salinan kategori;
+# login berikutnya dengan akun yang sama tidak membuat apa pun.
+# @name google
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{
+  "id_token": "GANTI_DENGAN_ID_TOKEN_GOOGLE"
+}
+
+### Error 401: id_token tidak valid atau kedaluwarsa
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{
+  "id_token": "token-ngawur"
+}
+
+### Error 409: email yang sama sudah terdaftar lewat password dan Supabase menolak menautkan
+# (bergantung pengaturan "manual linking" di dashboard Supabase). Untuk mencobanya: jalankan
+# "register" di atas dengan email akun Google Anda, lalu kirim id_token akun itu ke sini.
+# Bila penautan otomatis aktif, hasilnya justru 200 (masuk ke akun yang sama).
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{
+  "id_token": "GANTI_DENGAN_ID_TOKEN_DARI_AKUN_DENGAN_EMAIL_YANG_SUDAH_TERDAFTAR"
+}
+
+### Error 400: id_token kosong
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{
+  "id_token": ""
+}
+
+### Error 400: body kosong
+POST {{baseUrl}}/auth/google
+Content-Type: application/json
+
+{}
+
+### ============================================================
+### POST /auth/refresh
+### ============================================================
+
+# Sukses: 200 {session}. Memakai refresh_token dari request "login" di atas.
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "{{login.response.body.$.session.refresh_token}}"
+}
+
+### Error 401: refresh token tidak dikenal
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": "token-ngawur"
+}
+
+### Error 400: refresh_token kosong
+POST {{baseUrl}}/auth/refresh
+Content-Type: application/json
+
+{
+  "refresh_token": ""
+}
+
+### ============================================================
+### POST /auth/logout
+### ============================================================
+
+# Sukses: 204
+POST {{baseUrl}}/auth/logout
+Authorization: Bearer {{login.response.body.$.session.access_token}}
+
+### Error 401: tanpa token
+POST {{baseUrl}}/auth/logout
+
+### ============================================================
+### POST /auth/forgot-password
+### ============================================================
+
+# Sukses: 200 {message}. Pesan sama untuk email terdaftar maupun tidak.
+POST {{baseUrl}}/auth/forgot-password
+Content-Type: application/json
+
+{
+  "email": "dey@example.com"
+}
+
+### Error 400: email tidak sah
+POST {{baseUrl}}/auth/forgot-password
+Content-Type: application/json
+
+{
+  "email": "bukan-email"
+}
+
+### ============================================================
+### POST /auth/reset-password
+### ============================================================
+
+# Sukses: 204. Isi token dengan access_token dari tautan di email reset.
+POST {{baseUrl}}/auth/reset-password
+Content-Type: application/json
+
+{
+  "token": "GANTI_DENGAN_TOKEN_PEMULIHAN_DARI_EMAIL",
+  "password": "password-baru-456"
+}
+
+### Error 401: token pemulihan tidak valid
+POST {{baseUrl}}/auth/reset-password
+Content-Type: application/json
+
+{
+  "token": "token-ngawur",
+  "password": "password-baru-456"
+}
+
+### Error 400: password baru terlalu pendek
+POST {{baseUrl}}/auth/reset-password
+Content-Type: application/json
+
+{
+  "token": "token-ngawur",
+  "password": "pendek"
+}

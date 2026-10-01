@@ -1,0 +1,107 @@
+# Koleksi REST — Profil (/me)
+# Salin session.access_token dari respons login (auth.http) ke @token.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+# Pengguna KEDUA (daftarkan akun lain di auth.http), untuk uji isolasi di bagian bawah.
+@tokenB = GANTI_DENGAN_ACCESS_TOKEN_PENGGUNA_KEDUA
+@idPenggunaB = GANTI_DENGAN_ID_PENGGUNA_KEDUA
+
+### ============================================================
+### GET /me
+### ============================================================
+
+# Sukses: 200 UserProfile
+GET {{baseUrl}}/me
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/me
+
+### Error 401: token ngawur
+GET {{baseUrl}}/me
+Authorization: Bearer token-ngawur
+
+### ============================================================
+### PATCH /me
+### ============================================================
+
+# Sukses: 200 UserProfile
+PATCH {{baseUrl}}/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "full_name": "Dey Rafael",
+  "initial_balance": 2500000
+}
+
+### Sukses: menghapus avatar
+PATCH {{baseUrl}}/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "avatar_url": null
+}
+
+### Error 400: body kosong (minimal satu field)
+PATCH {{baseUrl}}/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{}
+
+### Error 400: saldo awal desimal
+PATCH {{baseUrl}}/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "initial_balance": 2500000.75
+}
+
+### Error 400: nama terlalu pendek, avatar bukan URL
+PATCH {{baseUrl}}/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "full_name": "D",
+  "avatar_url": "bukan-url"
+}
+
+### Aturan 8: user_id di body DIABAIKAN (field tak dikenal dibuang), 200 dan yang berubah
+### tetap profil pemilik token, bukan user_id di body. Periksa dengan GET /me sesudahnya.
+PATCH {{baseUrl}}/me
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "user_id": "00000000-0000-0000-0000-000000000000",
+  "full_name": "Penyusup"
+}
+
+### ============================================================
+### Isolasi antar-pengguna (aturan 8)
+### ============================================================
+
+# Dengan token A, user_id/id di query dan header X-User-Id DIABAIKAN: tetap profil A.
+GET {{baseUrl}}/me?user_id={{idPenggunaB}}&id={{idPenggunaB}}
+Authorization: Bearer {{token}}
+X-User-Id: {{idPenggunaB}}
+
+### PATCH dengan query user_id milik B: hanya profil A yang berubah
+PATCH {{baseUrl}}/me?user_id={{idPenggunaB}}
+Authorization: Bearer {{token}}
+X-User-Id: {{idPenggunaB}}
+Content-Type: application/json
+
+{
+  "id": "{{idPenggunaB}}",
+  "full_name": "Hanya Saya yang Berubah"
+}
+
+### Profil B tidak boleh berubah oleh request di atas
+GET {{baseUrl}}/me
+Authorization: Bearer {{tokenB}}

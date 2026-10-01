@@ -1,0 +1,445 @@
+# Koleksi REST — Transaksi
+#
+# Salin session.access_token dari respons login (auth.http) ke @token.
+# Urutan yang disarankan, karena request memakai id dari respons sebelumnya:
+#   1. "expenseCats" dan "accounts"  (ambil category_id dan account_id)
+#   2. "createTx"                    (buat transaksi)
+#   3. request lain bebas urutan; "delete" harus sebelum "restore"
+# Tanggal memakai {{$localDatetime "YYYY-MM-DD"}} (hari ini, jam komputer Anda) karena
+# server menolak tanggal di masa depan dan lebih dari satu tahun ke belakang.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+
+### ============================================================
+### Persiapan: id kategori dan akun
+### ============================================================
+
+# @name expenseCats
+GET {{baseUrl}}/categories?type=expense
+Authorization: Bearer {{token}}
+
+###
+
+# @name incomeCats
+GET {{baseUrl}}/categories?type=income
+Authorization: Bearer {{token}}
+
+###
+
+# @name accounts
+GET {{baseUrl}}/accounts
+Authorization: Bearer {{token}}
+
+### ============================================================
+### POST /transactions
+### ============================================================
+
+# Sukses: 201 Transaction (pengeluaran Rp25.000, kategori pengeluaran pertama)
+# @name createTx
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}",
+  "description": "makan siang"
+}
+
+### Sukses: pemasukan tanpa deskripsi
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "income",
+  "amount": 5000000,
+  "category_id": "{{incomeCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: nominal nol
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 0,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: nominal negatif
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": -25000,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: nominal desimal (uang harus bilangan bulat rupiah)
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000.5,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: nominal berupa string
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": "25 ribu",
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: nominal di atas Rp1 miliar
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 1000000001,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: tanggal di masa depan (besok)
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD" 1 d}}"
+}
+
+### Error 400: tanggal lebih dari satu tahun ke belakang
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000,
+  "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD" -2 y}}"
+}
+
+### Error 400: tipe transaksi tidak cocok dengan tipe kategori (pengeluaran ke kategori pemasukan)
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000,
+  "category_id": "{{incomeCats.response.body.$.data[0].id}}",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 404: kategori tidak ditemukan
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000,
+  "category_id": "00000000-0000-4000-8000-000000000000",
+  "account_id": "{{accounts.response.body.$.data[0].id}}",
+  "date": "{{$localDatetime "YYYY-MM-DD"}}"
+}
+
+### Error 400: field wajib hilang, tipe tak dikenal, deskripsi bukan teks
+POST {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "type": "transfer",
+  "description": 123
+}
+
+### Error 401: tanpa token
+POST {{baseUrl}}/transactions
+Content-Type: application/json
+
+{
+  "type": "expense",
+  "amount": 25000
+}
+
+### ============================================================
+### GET /transactions
+### ============================================================
+
+# Sukses: 200 {data[], next_cursor, has_more}; default 20 per halaman
+GET {{baseUrl}}/transactions
+Authorization: Bearer {{token}}
+
+### Sukses: dengan filter lengkap
+GET {{baseUrl}}/transactions?from=2026-09-01&to=2026-09-30&type=expense&source=whatsapp&q=makan&limit=10
+Authorization: Bearer {{token}}
+
+### Sukses: filter kategori dan akun dari request persiapan
+GET {{baseUrl}}/transactions?category_id={{expenseCats.response.body.$.data[0].id}}&account_id={{accounts.response.body.$.data[0].id}}
+Authorization: Bearer {{token}}
+
+# Paginasi cursor: halaman pertama satu baris. Buat minimal dua transaksi dulu.
+# @name page1
+GET {{baseUrl}}/transactions?limit=1
+Authorization: Bearer {{token}}
+
+### Sukses: halaman berikutnya (cursor diambil dari next_cursor milik "page1")
+GET {{baseUrl}}/transactions?limit=1&cursor={{page1.response.body.$.next_cursor}}
+Authorization: Bearer {{token}}
+
+### Error 400: cursor tidak valid
+GET {{baseUrl}}/transactions?cursor=ngawur
+Authorization: Bearer {{token}}
+
+### Error 400: limit di atas 100
+GET {{baseUrl}}/transactions?limit=101
+Authorization: Bearer {{token}}
+
+### Error 400: limit nol
+GET {{baseUrl}}/transactions?limit=0
+Authorization: Bearer {{token}}
+
+### Error 400: from setelah to
+GET {{baseUrl}}/transactions?from=2026-09-30&to=2026-09-01
+Authorization: Bearer {{token}}
+
+### Error 400: tanggal tidak sah, type dan source tak dikenal
+GET {{baseUrl}}/transactions?from=kemarin&type=transfer&source=telegram
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/transactions
+
+### ============================================================
+### GET /transactions/:id
+### ============================================================
+
+# Sukses: 200 TransactionDetail (source_message null karena dibuat manual)
+GET {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: id tidak ada
+GET {{baseUrl}}/transactions/00000000-0000-4000-8000-000000000000
+Authorization: Bearer {{token}}
+
+### Error 400: id bukan UUID
+GET {{baseUrl}}/transactions/bukan-uuid
+Authorization: Bearer {{token}}
+
+### Error 404: transaksi milik pengguna lain tidak boleh terlihat.
+### Daftarkan pengguna kedua di auth.http, masuk, lalu ganti @token ke token pengguna itu
+### dan jalankan request di bawah dengan id dari "createTx" pengguna pertama.
+GET {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### PATCH /transactions/:id
+### ============================================================
+
+# Sukses: 200 Transaction. updated_at diambil dari "createTx" (optimistic locking).
+# @name patchTx
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{createTx.response.body.$.updated_at}}",
+  "amount": 30000,
+  "description": "makan siang + es teh"
+}
+
+### Error 409 CONFLICT: updated_at basi (mengirim ulang updated_at lama dari "createTx"
+### setelah "patchTx" berhasil)
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{createTx.response.body.$.updated_at}}",
+  "amount": 35000
+}
+
+### Sukses: mengosongkan deskripsi (updated_at terbaru dari "patchTx")
+# @name clearDesc
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{patchTx.response.body.$.updated_at}}",
+  "description": null
+}
+
+### Error 400: updated_at tidak dikirim
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "amount": 30000
+}
+
+### Error 400: hanya updated_at, tidak ada field yang diubah
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{createTx.response.body.$.updated_at}}"
+}
+
+### Error 400: nominal desimal
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{createTx.response.body.$.updated_at}}",
+  "amount": 30000.5
+}
+
+### Error 400: hanya type yang berubah, bentrok dengan tipe kategori yang sudah ada
+### (jalankan sebelum "delete"; updated_at terbaru dari "clearDesc")
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{clearDesc.response.body.$.updated_at}}",
+  "type": "income"
+}
+
+### Error 400: category_id pemasukan untuk transaksi pengeluaran
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{clearDesc.response.body.$.updated_at}}",
+  "category_id": "{{incomeCats.response.body.$.data[0].id}}"
+}
+
+### Sukses: type dan category_id berubah bersamaan ke pasangan yang cocok
+### (ini mengubah updated_at; request PATCH sesudahnya perlu updated_at dari respons ini)
+# @name patchTypeAndCategory
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{clearDesc.response.body.$.updated_at}}",
+  "type": "income",
+  "category_id": "{{incomeCats.response.body.$.data[0].id}}"
+}
+
+### Error 404: category_id tidak ditemukan
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{clearDesc.response.body.$.updated_at}}",
+  "category_id": "00000000-0000-4000-8000-000000000000"
+}
+
+### Error 400: tanggal di masa depan
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{clearDesc.response.body.$.updated_at}}",
+  "date": "{{$localDatetime "YYYY-MM-DD" 1 d}}"
+}
+
+### Error 404: id tidak ada
+PATCH {{baseUrl}}/transactions/00000000-0000-4000-8000-000000000000
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "2026-09-28T05:12:35Z",
+  "amount": 30000
+}
+
+### ============================================================
+### DELETE /transactions/:id  (soft delete)
+### ============================================================
+
+# Sukses: 204
+DELETE {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: sudah dihapus (jalankan dua kali) atau id tidak ada
+DELETE {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: transaksi yang sudah dihapus tidak bisa dibaca (jalankan setelah "delete")
+GET {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: transaksi yang sudah dihapus tidak bisa diubah (jalankan setelah "delete")
+PATCH {{baseUrl}}/transactions/{{createTx.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "updated_at": "{{createTx.response.body.$.updated_at}}",
+  "amount": 1000
+}
+
+### Error 400: id bukan UUID
+DELETE {{baseUrl}}/transactions/bukan-uuid
+Authorization: Bearer {{token}}
+
+### ============================================================
+### POST /transactions/:id/restore
+### ============================================================
+
+# Sukses: 200 Transaction (setelah "delete" di atas)
+POST {{baseUrl}}/transactions/{{createTx.response.body.$.id}}/restore
+Authorization: Bearer {{token}}
+
+### Error 404: belum dihapus (jalankan dua kali) atau id tidak ada
+POST {{baseUrl}}/transactions/{{createTx.response.body.$.id}}/restore
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+POST {{baseUrl}}/transactions/{{createTx.response.body.$.id}}/restore

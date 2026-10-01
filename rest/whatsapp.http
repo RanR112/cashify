@@ -1,0 +1,194 @@
+# Koleksi REST — WhatsApp (penautan nomor)
+#
+# Salin session.access_token dari respons login (auth.http) ke @token.
+# Urutan alur normal: status -> link/request -> (OTP tiba di WhatsApp) -> link/verify
+# -> preferences -> DELETE link. Ganti nomor di bawah dengan nomor WhatsApp Anda sendiri
+# (+62...). Bot hanya mengirim OTP ke nomor yang diminta, maksimal 3 kali per nomor per hari.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+
+### ============================================================
+### GET /whatsapp/status
+### ============================================================
+
+# Sukses: 200 {status: unlinked | pending | verified, masked_phone, expires_at, ..., preferences}
+GET {{baseUrl}}/whatsapp/status
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/whatsapp/status
+
+### ============================================================
+### POST /whatsapp/link/request
+### ============================================================
+
+# Sukses: 200 {status: "pending", expires_at, masked_phone}
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+628123456789"
+}
+
+### Error 400: tanpa kode negara
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "08123456789"
+}
+
+### Error 400: kode negara bukan +62
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+14155550123"
+}
+
+### Error 400: nomor terlalu pendek, mengandung huruf
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+62abc"
+}
+
+### Error 409 CONFLICT: nomor sudah terverifikasi di akun lain
+### (tautkan nomor yang sama dari pengguna kedua setelah pengguna pertama memverifikasinya)
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+628123456789"
+}
+
+### Error 429 RATE_LIMITED: kirim request yang sama lebih dari 3 kali dalam sehari
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+628123456789"
+}
+
+### Error 503 SERVICE_UNAVAILABLE: sesi bot terputus (matikan OpenWA lalu kirim request ini)
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+628123456789"
+}
+
+### ============================================================
+### POST /whatsapp/link/verify
+### ============================================================
+
+# Sukses: 200 {status: "verified", phone, verified_at}. Isi code dengan OTP dari WhatsApp.
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "483920"
+}
+
+### Error 400: kode salah, details[].attempts_left menunjukkan sisa percobaan (maksimal 5)
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "000000"
+}
+
+### Error 400: kode bukan 6 digit
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "48392"
+}
+
+### Error 400: kode berisi huruf
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "abcdef"
+}
+
+### ============================================================
+### POST /whatsapp/link/resend
+### ============================================================
+
+# Sukses: 200 {status: "pending", expires_at, masked_phone}. Tanpa body.
+# Error 404 bila tidak ada permintaan yang menunggu; 429 bila kurang dari 60 detik sejak kiriman terakhir.
+POST {{baseUrl}}/whatsapp/link/resend
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+POST {{baseUrl}}/whatsapp/link/resend
+
+### ============================================================
+### PATCH /whatsapp/preferences
+### ============================================================
+
+# Sukses: 200 WhatsappStatus (hanya untuk tautan verified)
+PATCH {{baseUrl}}/whatsapp/preferences
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "daily_summary_enabled": true,
+  "budget_alert_enabled": false
+}
+
+### Error 400: body kosong (minimal satu field)
+PATCH {{baseUrl}}/whatsapp/preferences
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{}
+
+### Error 400: nilai bukan boolean
+PATCH {{baseUrl}}/whatsapp/preferences
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "daily_summary_enabled": "ya"
+}
+
+### Error 404: tautan belum terverifikasi
+PATCH {{baseUrl}}/whatsapp/preferences
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "daily_summary_enabled": true
+}
+
+### ============================================================
+### DELETE /whatsapp/link
+### ============================================================
+
+# Sukses: 204 (soft: status menjadi disabled, riwayat pesan tetap ada)
+DELETE {{baseUrl}}/whatsapp/link
+Authorization: Bearer {{token}}
+
+### Error 404: tidak ada tautan aktif (jalankan dua kali)
+DELETE {{baseUrl}}/whatsapp/link
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+DELETE {{baseUrl}}/whatsapp/link
