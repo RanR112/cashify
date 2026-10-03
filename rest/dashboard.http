@@ -1,5 +1,17 @@
 # Koleksi REST — Dashboard
+#
 # Salin session.access_token dari respons login (auth.http) ke @token.
+# Untuk data yang terisi, login sebagai pengguna demo (README bagian "Data demo", lalu
+# `npm run seed`), atau pakai `npm run seed:reset` bila tanggalnya sudah menua.
+#
+# Respons: {balance, month: {income, expense, net}, cashflow[], recent_transactions[]}
+#  - balance  = initial_balance + total pemasukan - total pengeluaran, SELURUH waktu.
+#               Dihitung tiap panggilan (tidak disimpan), tidak bergantung pada ?month,
+#               transaksi yang di-soft-delete tidak ikut, dan bisa negatif.
+#  - month    = angka bulan yang diminta (batas bulan menurut Asia/Jakarta); net bisa negatif.
+#  - cashflow = satu entri per hari yang punya transaksi, naik menurut tanggal.
+#  - recent_transactions = 5 terbaru, terlepas dari ?month, bentuk sama dengan Transaction.
+#  - tidak ada budget_summary (anggaran di luar cakupan; claude/API.md bagian 5).
 
 @baseUrl = http://localhost:3000
 @token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
@@ -8,17 +20,27 @@
 ### GET /dashboard
 ### ============================================================
 
-# Sukses: 200 {balance, month, cashflow[], recent_transactions[]} untuk bulan berjalan
+# Sukses: 200 untuk bulan berjalan (Asia/Jakarta)
 GET {{baseUrl}}/dashboard
 Authorization: Bearer {{token}}
 
-### Sukses: bulan tertentu
+### Sukses: bulan tertentu. Dengan data demo, tiga bulan terakhir berisi data
+# (mis. hari ini 2026-10-03: 2026-08, 2026-09, 2026-10). Ganti sesuai tanggal seed Anda.
 GET {{baseUrl}}/dashboard?month=2026-09
 Authorization: Bearer {{token}}
 
-### Sukses: bulan tanpa transaksi, semua angka 0, cashflow kosong
+### Sukses: bulan sebelumnya. "balance" harus sama persis dengan request di atas;
+# hanya "month" dan "cashflow" yang berubah.
+GET {{baseUrl}}/dashboard?month=2026-08
+Authorization: Bearer {{token}}
+
+### Sukses: bulan tanpa transaksi. month semua 0 dan cashflow [], tetapi balance tetap
+# saldo seluruh waktu dan recent_transactions tetap terisi.
 GET {{baseUrl}}/dashboard?month=2020-01
 Authorization: Bearer {{token}}
+
+### Pengguna baru tanpa transaksi (register di auth.http, lalu pakai token-nya):
+# {"balance": <initial_balance>, "month": {0,0,0}, "cashflow": [], "recent_transactions": []}
 
 ### Error 400: format bulan salah
 GET {{baseUrl}}/dashboard?month=September-2026
@@ -28,5 +50,13 @@ Authorization: Bearer {{token}}
 GET {{baseUrl}}/dashboard?month=2026-13
 Authorization: Bearer {{token}}
 
+### Error 400: bulan 00
+GET {{baseUrl}}/dashboard?month=2026-00
+Authorization: Bearer {{token}}
+
 ### Error 401: tanpa token
 GET {{baseUrl}}/dashboard
+
+### Error 401: token ngawur
+GET {{baseUrl}}/dashboard
+Authorization: Bearer ngawur

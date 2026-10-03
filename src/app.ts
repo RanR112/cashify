@@ -15,15 +15,18 @@ import { createAccountsService } from './modules/accounts/accounts.service.js';
 import { createCategoriesRepository } from './modules/categories/categories.repository.js';
 import { createCategoriesRouter } from './modules/categories/categories.routes.js';
 import { createCategoriesService } from './modules/categories/categories.service.js';
+import { createDashboardRouter } from './modules/dashboard/dashboard.routes.js';
+import { createDashboardService } from './modules/dashboard/dashboard.service.js';
 import { createTransactionsRepository } from './modules/transactions/transactions.repository.js';
 import { createTransactionsRouter } from './modules/transactions/transactions.routes.js';
 import { createTransactionsService } from './modules/transactions/transactions.service.js';
+import { createTransactionsSummary } from './modules/transactions/transactions.summary.js';
 import { createUsersRepository } from './modules/users/users.repository.js';
 import { createUsersRouter } from './modules/users/users.routes.js';
 import { createUsersService } from './modules/users/users.service.js';
 
 export interface AppDeps {
-  /** Klien Prisma untuk modul users, accounts, categories, transactions; bawaannya klien tunggal dari lib/database. */
+  /** Klien Prisma untuk modul users, accounts, categories, transactions, dashboard; bawaannya klien tunggal dari lib/database. */
   prisma?: PrismaClient;
   /** Disuntik di test; bawaannya Supabase Auth + Prisma sungguhan. */
   authService?: AuthService;
@@ -51,15 +54,28 @@ export function createApp(deps: AppDeps = {}) {
 
   // Konstruktor PrismaClient tidak membuka koneksi, jadi createApp() tanpa .env tetap bisa dimuat.
   const prisma = deps.prisma ?? getPrisma();
-  app.use('/me', createUsersRouter(createUsersService(createUsersRepository(prisma)), deps.verifyAuth));
+  const usersService = createUsersService(createUsersRepository(prisma));
+  const transactionsService = createTransactionsService(createTransactionsRepository(prisma));
+
+  app.use('/me', createUsersRouter(usersService, deps.verifyAuth));
   app.use('/accounts', createAccountsRouter(createAccountsService(createAccountsRepository(prisma)), deps.verifyAuth));
   app.use(
     '/categories',
     createCategoriesRouter(createCategoriesService(createCategoriesRepository(prisma)), deps.verifyAuth),
   );
+  app.use('/transactions', createTransactionsRouter(transactionsService, deps.verifyAuth));
+
+  // Dashboard adalah agregator: dirakit dari service lain, tanpa repository sendiri.
   app.use(
-    '/transactions',
-    createTransactionsRouter(createTransactionsService(createTransactionsRepository(prisma)), deps.verifyAuth),
+    '/dashboard',
+    createDashboardRouter(
+      createDashboardService({
+        users: usersService,
+        transactions: transactionsService,
+        summary: createTransactionsSummary(prisma),
+      }),
+      deps.verifyAuth,
+    ),
   );
 
   // Route modul dipasang di atas garis ini. notFound dan errorHandler harus paling akhir.
