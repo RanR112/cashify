@@ -87,6 +87,20 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
     expect(await prisma.user.count()).toBe(1);
   });
 
+  it('seed ulang setelah pengguna demo dihapus: pesan sisa (user_id NULL) tidak membuat seed gagal', async () => {
+    const first = await seedDemo(prisma, provider, { ...options, reset: false });
+    await resetUserData(prisma); // seperti menghapus akun demo; message_logs tertinggal dengan user_id NULL
+    expect(await prisma.messageLog.count({ where: { userId: null } })).toBe(expectedMessages);
+    provider = new FakeAuthProvider(prisma);
+
+    const second = await seedDemo(prisma, provider, { ...options, reset: false });
+
+    expect(second.userId).not.toBe(first.userId);
+    expect(second.seededTransactions).toBe(true);
+    expect(await prisma.messageLog.count()).toBe(expectedMessages);
+    expect((await counts(second.userId)).messages).toBe(expectedMessages);
+  });
+
   it('tidak menimpa transaksi yang ditambahkan pengguna demo', async () => {
     const { userId } = await seedDemo(prisma, provider, { ...options, reset: false });
     const account = await prisma.account.findFirstOrThrow({ where: { userId } });

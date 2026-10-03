@@ -161,8 +161,10 @@ export async function seedDemo(
         };
       }
 
-      // Bila transaksi dihapus manual tetapi pesannya tertinggal, wa_message_id akan bertabrakan.
-      await tx.messageLog.deleteMany({ where: { userId: user.id, sessionId: DEMO_WA_SESSION_ID } });
+      // Sesi `demo` milik seed ini saja. Pesan sisa harus dibersihkan tanpa memfilter user_id:
+      // menghapus pengguna demo (akun Supabase atau DELETE /me) membuat user_id pesannya NULL
+      // (ON DELETE SET NULL), sehingga seed berikutnya menabrak unique (session_id, wa_message_id).
+      await tx.messageLog.deleteMany({ where: { sessionId: DEMO_WA_SESSION_ID } });
 
       const categories = await tx.category.findMany({
         where: { userId: user.id, deletedAt: null },
