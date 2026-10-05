@@ -51,6 +51,9 @@ function fakeRepository(overrides: Partial<TransactionsRepository> = {}): Transa
     update: vi.fn(async (): Promise<UpdateOutcome> => ({ status: 'updated', record: detail() })),
     softDelete: vi.fn(async () => true),
     restore: vi.fn(async () => detail()),
+    findBySourceMessage: vi.fn(async () => null),
+    findLatestFromWhatsapp: vi.fn(async () => null),
+    topCategoryIds: vi.fn(async () => []),
     findVisibleCategory: vi.fn(async (_userId, id) => {
       const type = categories[id];
       return type ? { id, type } : null;
@@ -341,5 +344,52 @@ describe('toTransactionBody', () => {
     expect(keys).not.toContain('user_id');
     expect(keys).not.toContain('occurred_at');
     expect(keys).not.toContain('deleted_at');
+  });
+});
+
+describe('createFromWhatsapp', () => {
+  const MESSAGE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const input = (overrides = {}) => ({
+    type: 'expense' as const,
+    amount: 25000,
+    categoryId: FOOD,
+    accountId: CASH,
+    date: '2026-09-28',
+    description: 'makan siang',
+    messageTime: new Date('2026-09-28T05:12:35.000Z'), // 12:12 WIB
+    sourceMessageId: MESSAGE,
+    ...overrides,
+  });
+
+  it('sumber whatsapp, pesan asal tercatat, dan audit oleh aktor whatsapp', async () => {
+    const repository = fakeRepository();
+    await createTransactionsService(repository).createFromWhatsapp(USER, input());
+
+    expect(repository.create).toHaveBeenCalledWith(
+      USER,
+      expect.objectContaining({ source: 'whatsapp', sourceMessageId: MESSAGE, amount: 25000, description: 'makan siang' }),
+      { ipAddress: null, actor: 'whatsapp' },
+    );
+  });
+
+  it('tanggal hari pesan: occurred_at memakai jam pesan', async () => {
+    const repository = fakeRepository();
+    await createTransactionsService(repository).createFromWhatsapp(USER, input());
+    expect(vi.mocked(repository.create).mock.calls[0]?.[1].occurredAt).toEqual(new Date('2026-09-28T05:12:35.000Z'));
+  });
+
+  it('tanggal lain (kemarin): occurred_at awal hari Jakarta tanggal itu', async () => {
+    const repository = fakeRepository();
+    await createTransactionsService(repository).createFromWhatsapp(USER, input({ date: '2026-09-27' }));
+    expect(vi.mocked(repository.create).mock.calls[0]?.[1].occurredAt).toEqual(new Date('2026-09-26T17:00:00.000Z'));
+  });
+
+  it('tipe kategori tidak cocok ditolak dan tidak menulis apa pun', async () => {
+    const repository = fakeRepository();
+    const error = await rejection(
+      createTransactionsService(repository).createFromWhatsapp(USER, input({ categoryId: SALARY })),
+    );
+    expect(error.code).toBe('VALIDATION_ERROR');
+    expect(repository.create).not.toHaveBeenCalled();
   });
 });

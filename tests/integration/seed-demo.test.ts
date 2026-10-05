@@ -162,6 +162,60 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
     expect(await prisma.account.count({ where: { userId: identity.id } })).toBe(1);
   });
 
+  describe('reset dan tautan WhatsApp', () => {
+    const linkWhatsapp = async (userId: string, phone: string) => {
+      await prisma.whatsappAccount.create({
+        data: {
+          userId,
+          phoneE164: `+${phone}`,
+          waChatId: `${phone}@c.us`,
+          status: 'verified',
+          verifiedAt: NOW,
+        },
+      });
+      await prisma.whatsappVerification.create({
+        data: { userId, phoneE164: `+${phone}`, codeHash: 'hash', expiresAt: new Date(NOW.getTime() + 600_000) },
+      });
+    };
+
+    const waRows = async (userId: string) => ({
+      accounts: await prisma.whatsappAccount.count({ where: { userId } }),
+      verifications: await prisma.whatsappVerification.count({ where: { userId } }),
+    });
+
+    it('reset membebaskan tautan WhatsApp hasil latihan, sehingga nomornya bisa ditautkan lagi', async () => {
+      const { userId } = await seedDemo(prisma, provider, { ...options, reset: false });
+      await linkWhatsapp(userId, '628123456789');
+      expect(await waRows(userId)).toEqual({ accounts: 1, verifications: 1 });
+
+      await seedDemo(prisma, provider, { ...options, reset: true });
+
+      expect(await waRows(userId)).toEqual({ accounts: 0, verifications: 0 });
+      // Unique index parsial (phone_e164) WHERE verified menolak nomor yang sama bila tautan lama masih ada.
+      await expect(linkWhatsapp(userId, '628123456789')).resolves.toBeUndefined();
+    });
+
+    it('seed biasa (tanpa reset) tidak menyentuh tautan WhatsApp', async () => {
+      const { userId } = await seedDemo(prisma, provider, { ...options, reset: false });
+      await linkWhatsapp(userId, '628123456789');
+
+      await seedDemo(prisma, provider, { ...options, reset: false });
+
+      expect(await waRows(userId)).toEqual({ accounts: 1, verifications: 1 });
+    });
+
+    it('reset tidak menyentuh tautan WhatsApp pengguna lain', async () => {
+      await seedDemo(prisma, provider, { ...options, reset: false });
+      const { identity } = await provider.signUp({ email: 'lain@example.com', password: 'rahasia-banget-123', fullName: 'Pengguna Lain' });
+      await createAuthRepository(prisma).provisionNewUser({ id: identity.id, fullName: 'Pengguna Lain', avatarUrl: null, initialBalance: 0 });
+      await linkWhatsapp(identity.id, '628111222333');
+
+      await seedDemo(prisma, provider, { ...options, reset: true });
+
+      expect(await waRows(identity.id)).toEqual({ accounts: 1, verifications: 1 });
+    });
+  });
+
   it('akun demo dengan password lain ditolak dengan pesan yang jelas', async () => {
     await provider.signUp({ email: DEMO_EMAIL, password: 'password-lain-123', fullName: 'Orang Lain' });
     await expect(seedDemo(prisma, provider, { ...options, reset: false })).rejects.toThrow(/password-nya bukan/);

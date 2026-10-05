@@ -275,3 +275,37 @@ Content-Type: application/json
   "token": "token-ngawur",
   "password": "pendek"
 }
+
+### ============================================================
+### Demo (claude/DEMO-SCRIPT.md, langkah 1): pengguna baru
+### ============================================================
+
+# Ganti @demoEmail dengan alamat yang belum pernah terdaftar (latihan sebelumnya sudah memakai
+# yang lama, hasilnya 409). Domain example.com diterima Supabase; bila ditolak, pakai domain lain.
+# Register dibatasi 3 per jam per IP.
+@demoEmail = penguji-1@example.com
+@demoPassword = rahasia-banget-123
+
+# Sukses: 201 {user, session}. Saldo awal Rp1.000.000 supaya dashboard langsung bermakna.
+POST {{baseUrl}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "{{demoEmail}}",
+  "password": "{{demoPassword}}",
+  "full_name": "Penguji Satu",
+  "initial_balance": 1000000
+}
+
+###
+
+# Sukses: 200 {user, session}. Salin session.access_token ke @token di transactions.http,
+# dashboard.http, dan whatsapp.http.
+# @name demoLogin
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{demoEmail}}",
+  "password": "{{demoPassword}}"
+}

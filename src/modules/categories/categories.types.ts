@@ -17,8 +17,15 @@ export interface CategoryRecord {
   sortOrder: number;
 }
 
+/** Kategori beserta kata kuncinya: kamus parser WhatsApp. Terpisah dari `CategoryRecord` agar kata kunci tidak ikut ke response API. */
+export interface CategoryWithKeywords extends CategoryRecord {
+  keywords: string[];
+}
+
 /** Semua metode menerima `userId` (dari klaim JWT) sebagai argumen pertama. */
 export interface CategoriesRepository {
   /** Kategori sistem DAN milik pengguna: `user_id IS NULL OR user_id = $1`. */
   listVisibleTo(userId: string, type?: CategoryType): Promise<CategoryRecord[]>;
+  /** Seperti `listVisibleTo` (kedua tipe), tetapi memuat `keywords`. */
+  listWithKeywords(userId: string): Promise<CategoryWithKeywords[]>;
 }

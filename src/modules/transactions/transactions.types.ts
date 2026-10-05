@@ -37,6 +37,8 @@ export interface TransactionDetailRecord extends TransactionRecord {
 /** Konteks pencatatan audit; diisi controller supaya service tidak mengenal Express. */
 export interface AuditContext {
   ipAddress: string | null;
+  /** Siapa yang bertindak di audit_logs; bawaannya `user` (REST). Worker WhatsApp memakai `whatsapp`. */
+  actor?: 'user' | 'whatsapp' | undefined;
 }
 
 export interface TransactionFilters {
@@ -63,6 +65,24 @@ export interface NewTransaction {
   accountId: string;
   occurredAt: Date;
   description: string | null;
+  /** Bawaannya `manual` (REST). Alur WhatsApp mengisi `whatsapp` beserta pesan asalnya. */
+  source?: 'manual' | 'whatsapp' | undefined;
+  sourceMessageId?: string | null | undefined;
+}
+
+/** Masukan alur percakapan WhatsApp; nominal dan tanggal sudah diekstraksi regex oleh parser. */
+export interface WhatsappTransactionInput {
+  type: 'income' | 'expense';
+  amount: number;
+  categoryId: string;
+  accountId: string;
+  /** Tanggal kalender Jakarta (YYYY-MM-DD). */
+  date: string;
+  description: string | null;
+  /** Waktu pesan diterima; menjadi `occurred_at` bila `date` adalah hari pesan itu. */
+  messageTime: Date;
+  /** Pesan (message_logs.id) tempat nominal ditulis. */
+  sourceMessageId: string;
 }
 
 /** Field yang diubah PATCH, dalam nama kolom Prisma. `undefined` berarti tidak diubah. */
@@ -101,6 +121,12 @@ export interface TransactionsRepository {
   softDelete(userId: string, id: string, audit: AuditContext): Promise<boolean>;
   /** Null bila transaksi tidak ada atau belum dihapus. */
   restore(userId: string, id: string, audit: AuditContext): Promise<TransactionRecord | null>;
+  /** Transaksi (juga yang sudah dihapus) yang berasal dari pesan ini; kunci anti-ganda saat job diulang. */
+  findBySourceMessage(userId: string, sourceMessageId: string): Promise<TransactionRecord | null>;
+  /** Transaksi `whatsapp` aktif terbaru yang dibuat sejak `since`. */
+  findLatestFromWhatsapp(userId: string, since: Date): Promise<TransactionRecord | null>;
+  /** Id kategori yang paling sering dipakai pada tipe ini sejak tanggal `sinceDate` (YYYY-MM-DD), terbanyak dulu. */
+  topCategoryIds(userId: string, type: 'income' | 'expense', sinceDate: string, limit: number): Promise<string[]>;
   /** Kategori milik pengguna atau kategori sistem, belum dihapus. */
   findVisibleCategory(userId: string, categoryId: string): Promise<{ id: string; type: string } | null>;
   findOwnedAccount(userId: string, accountId: string): Promise<{ id: string } | null>;

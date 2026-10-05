@@ -1,5 +1,5 @@
 import { AppError } from '../../shared/errors/AppError.js';
-import { jakartaDayStartUtc } from '../../shared/utils/timezone.js';
+import { jakartaDayStartUtc, toJakartaDate } from '../../shared/utils/timezone.js';
 import { decodeCursor, encodeCursor } from '../../shared/utils/cursor.js';
 import { cursorPayloadSchema } from './transactions.schema.js';
 import type {
@@ -13,6 +13,7 @@ import type {
   TransactionRecord,
   TransactionsRepository,
   UpdateTransactionInput,
+  WhatsappTransactionInput,
 } from './transactions.types.js';
 
 const toDateString = (date: Date): string => date.toISOString().slice(0, 10);
@@ -114,6 +115,43 @@ export function createTransactionsService(repository: TransactionsRepository) {
       );
       return toTransactionBody(record);
     },
+
+    /** Jalur alur percakapan WhatsApp: sumber `whatsapp`, audit oleh aktor `whatsapp`. */
+    async createFromWhatsapp(userId: string, input: WhatsappTransactionInput): Promise<TransactionBody> {
+      await assertCategory(userId, input.categoryId, input.type);
+      await assertAccount(userId, input.accountId);
+
+      const record = await repository.create(
+        userId,
+        {
+          type: input.type,
+          amount: input.amount,
+          categoryId: input.categoryId,
+          accountId: input.accountId,
+          // Transaksi hari ini menyimpan jam pesan; tanggal lain (mis. "kemarin") awal hari Jakarta.
+          occurredAt: toJakartaDate(input.messageTime) === input.date ? input.messageTime : jakartaDayStartUtc(input.date),
+          description: input.description,
+          source: 'whatsapp',
+          sourceMessageId: input.sourceMessageId,
+        },
+        { ipAddress: null, actor: 'whatsapp' },
+      );
+      return toTransactionBody(record);
+    },
+
+    async findBySourceMessage(userId: string, sourceMessageId: string): Promise<TransactionBody | null> {
+      const record = await repository.findBySourceMessage(userId, sourceMessageId);
+      return record ? toTransactionBody(record) : null;
+    },
+
+    /** Transaksi WhatsApp terakhir dalam 24 jam, kandidat "hapus transaksi terakhir". */
+    async latestFromWhatsapp(userId: string, now: Date): Promise<TransactionBody | null> {
+      const record = await repository.findLatestFromWhatsapp(userId, new Date(now.getTime() - 24 * 60 * 60 * 1000));
+      return record ? toTransactionBody(record) : null;
+    },
+
+    topCategoryIds: (userId: string, type: 'income' | 'expense', sinceDate: string, limit: number) =>
+      repository.topCategoryIds(userId, type, sinceDate, limit),
 
     async update(
       userId: string,

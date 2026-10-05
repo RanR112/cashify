@@ -12,5 +12,22 @@ export function createCategoriesRepository(prisma: PrismaClient): CategoriesRepo
         select: { id: true, userId: true, name: true, slug: true, type: true, icon: true, color: true, sortOrder: true },
         orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }],
       }),
+
+    listWithKeywords: (userId) =>
+      prisma.category.findMany({
+        where: visibleTo(userId),
+        select: {
+          id: true,
+          userId: true,
+          name: true,
+          slug: true,
+          type: true,
+          icon: true,
+          color: true,
+          sortOrder: true,
+          keywords: true,
+        },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }, { id: 'asc' }],
+      }),
   };
 }

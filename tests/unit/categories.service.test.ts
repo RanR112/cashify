@@ -84,7 +84,7 @@ describe('toCategoryBody', () => {
 describe('createCategoriesService.list', () => {
   it('meneruskan userId sebagai argumen pertama dan type sebagai kedua', async () => {
     const listVisibleTo = vi.fn().mockResolvedValue([record({ id: 's', slug: 'food' })]);
-    const service = createCategoriesService({ listVisibleTo });
+    const service = createCategoriesService({ listVisibleTo, listWithKeywords: vi.fn() });
 
     const result = await service.list(USER, 'expense');
 

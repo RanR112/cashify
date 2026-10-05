@@ -83,7 +83,7 @@ function writeAudit(
       entityId,
       action,
       changes,
-      actorType: 'user',
+      actorType: audit.actor ?? 'user',
       ipAddress: audit.ipAddress,
     },
   });
@@ -129,7 +129,7 @@ export function createTransactionsRepository(prisma: PrismaClient): Transactions
       const owner = requireUserId(userId);
       return prisma.$transaction(async (tx) => {
         const record = await tx.transaction.create({
-          data: { ...data, userId: owner, source: 'manual' },
+          data: { ...data, userId: owner, source: data.source ?? 'manual' },
           select: recordSelect,
         });
         await writeAudit(tx, owner, record.id, 'create', { after: snapshot(record) }, audit);
@@ -212,6 +212,32 @@ export function createTransactionsRepository(prisma: PrismaClient): Transactions
         );
         return tx.transaction.findFirst({ where: { id, ...ownedBy(owner) }, select: recordSelect });
       });
+    },
+
+    // Tanpa filter deleted_at: transaksi yang sudah dihapus tetap menandai pesan ini sudah diproses.
+    findBySourceMessage: (userId, sourceMessageId) =>
+      prisma.transaction.findFirst({
+        where: { userId: requireUserId(userId), sourceMessageId },
+        select: recordSelect,
+      }),
+
+    findLatestFromWhatsapp: (userId, since) =>
+      prisma.transaction.findFirst({
+        where: { ...ownedBy(userId), source: 'whatsapp', createdAt: { gte: since } },
+        select: recordSelect,
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      }),
+
+    async topCategoryIds(userId, type, sinceDate, limit) {
+      const rows = await prisma.transaction.groupBy({
+        by: ['categoryId'],
+        where: { ...ownedBy(userId), type, date: { gte: dateOf(sinceDate) } },
+        _count: { categoryId: true },
+        // `categoryId` memutus seri supaya urutannya stabil.
+        orderBy: [{ _count: { categoryId: 'desc' } }, { categoryId: 'asc' }],
+        take: limit,
+      });
+      return rows.map((row) => row.categoryId);
     },
 
     findVisibleCategory: (userId, categoryId) =>

@@ -443,3 +443,22 @@ Authorization: Bearer {{token}}
 
 ### Error 401: tanpa token
 POST {{baseUrl}}/transactions/{{createTx.response.body.$.id}}/restore
+
+### ============================================================
+### Demo (claude/DEMO-SCRIPT.md, langkah 7 dan 9)
+### ============================================================
+
+# Langkah 7: transaksi yang tersimpan dari WhatsApp. Ambil id dari respons, lalu buka detailnya;
+# source_message.body memperlihatkan pesan asli yang melahirkannya.
+# @name demoWhatsappList
+GET {{baseUrl}}/transactions?source=whatsapp
+Authorization: Bearer {{token}}
+
+###
+
+GET {{baseUrl}}/transactions/{{demoWhatsappList.response.body.$.data[0].id}}
+Authorization: Bearer {{token}}
+
+### Langkah 9: setelah webhooks.http 9a-9d, tepat SATU transaksi "makan malam" (Rp40.000)
+GET {{baseUrl}}/transactions?q=makan%20malam
+Authorization: Bearer {{token}}

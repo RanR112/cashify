@@ -18,12 +18,15 @@ import { createSupabaseAuthProvider } from '../src/lib/auth.js';
 import { SYSTEM_CATEGORIES } from './seed-data.js';
 import { DEMO_EMAIL, DEMO_PASSWORD } from './seed-demo-data.js';
 import { seedDemo } from './seed-demo.js';
+import { clearConversationStateAt } from './seed-demo-redis.js';
 
-// Hanya yang dibutuhkan seed; env.ts milik aplikasi menuntut semuanya (OpenWA, Redis, dst.).
+// Hanya yang dibutuhkan seed; env.ts milik aplikasi menuntut semuanya (OpenWA, dst.).
 const seedEnvSchema = z.object({
   SUPABASE_URL: z.url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  // Opsional: hanya untuk membersihkan state percakapan saat --reset (best-effort).
+  REDIS_URL: z.string().min(1).default('redis://localhost:6379'),
   DEMO_EMAIL: z.email().default(DEMO_EMAIL),
   DEMO_PASSWORD: z.string().min(8).max(72).default(DEMO_PASSWORD),
 });
@@ -91,10 +94,30 @@ async function seedDemoUser(reset: boolean): Promise<void> {
     throw error;
   }
 
+  if (reset) {
+    const cleared = await clearConversationStateAt(env.REDIS_URL, result.userId);
+    console.log(
+      cleared.ok
+        ? 'State percakapan WhatsApp pengguna demo di Redis dibersihkan.'
+        : `Peringatan: Redis tidak terjangkau (${cleared.reason}); state percakapan tidak dibersihkan. ` +
+            'Tidak masalah bila Redis memang belum menyala; pending lama kedaluwarsa sendiri dalam 15 menit.',
+    );
+  }
+
   if (result.seededTransactions) {
     console.log(
       `Seed demo selesai untuk ${env.DEMO_EMAIL}: ${result.transactions} transaksi ` +
         `(${result.deletedTransactions} di-soft-delete), ${result.whatsappMessages} pesan WhatsApp.`,
+    );
+    console.log(
+      [
+        '',
+        'Siap didemokan:',
+        `  email     ${env.DEMO_EMAIL}`,
+        `  password  ${env.DEMO_PASSWORD}`,
+        '  langkah   POST /auth/login -> GET /dashboard (rest/auth.http, rest/dashboard.http)',
+        '  WhatsApp  belum tertaut; lanjut ke claude/DEMO-SCRIPT.md',
+      ].join('\n'),
     );
   } else {
     console.log(

@@ -4,9 +4,10 @@
 // Dua mode:
 //  - biasa: pengguna dan dompet find-or-create; bila pengguna demo sudah punya transaksi,
 //    transaksi dilewati (tidak menimpa apa pun, termasuk yang ditambahkan saat demo).
-//  - reset: data demo dihapus lebih dulu lalu diisi ulang dengan tanggal relatif terhadap
-//    hari ini. Ini alat khusus demo, bukan jalur aplikasi, jadi penghapusannya permanen dan
-//    hanya menyentuh baris milik pengguna demo.
+//  - reset: data demo dihapus lebih dulu (transaksi, pesan, audit, dompet tambahan, dan tautan
+//    WhatsApp) lalu diisi ulang dengan tanggal relatif terhadap hari ini. Ini alat khusus demo,
+//    bukan jalur aplikasi, jadi penghapusannya permanen dan hanya menyentuh baris milik
+//    pengguna demo. State Redis pengguna demo dibersihkan di prisma/seed.ts (best-effort).
 //
 // Pengguna dibuat lewat AuthProvider yang sama dengan aplikasi (`src/lib/auth.ts`), disuntik
 // supaya test integrasi bisa memakai FakeAuthProvider tanpa jaringan.
@@ -111,6 +112,10 @@ async function wipeDemoData(tx: Prisma.TransactionClient, userId: string): Promi
   await tx.auditLog.deleteMany({ where: { userId } });
   await tx.transaction.deleteMany({ where: { userId } });
   await tx.messageLog.deleteMany({ where: { userId } });
+  // Tautan WhatsApp hasil latihan demo: tanpa ini, penautan ulang ditolak 409 ("sudah tertaut")
+  // dan nomornya tetap terkunci oleh unique index parsial (phone_e164, wa_chat_id) WHERE verified.
+  await tx.whatsappVerification.deleteMany({ where: { userId } });
+  await tx.whatsappAccount.deleteMany({ where: { userId } });
   await tx.account.deleteMany({ where: { userId, isDefault: false } });
   await tx.user.update({
     where: { id: userId },

@@ -13,8 +13,8 @@ import type {
  *
  * Urutan masukan dipertahankan; posisi sebuah slug ditentukan kemunculan pertamanya.
  */
-export function mergeCategories(records: CategoryRecord[]): CategoryRecord[] {
-  const bySlug = new Map<string, CategoryRecord>();
+export function mergeCategories<T extends CategoryRecord>(records: T[]): T[] {
+  const bySlug = new Map<string, T>();
   for (const record of records) {
     const key = `${record.type}:${record.slug}`;
     const existing = bySlug.get(key);
