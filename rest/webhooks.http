@@ -1,98 +1,345 @@
 # Koleksi REST — Webhook OpenWA
 #
 # Endpoint ini dipanggil OpenWA, bukan klien mobile. Koleksi ini mensimulasikan kiriman OpenWA
-# untuk memeriksa lapisan keamanan dan idempotency.
+# v4.76.0 untuk memeriksa keamanan, penyaringan event, dan idempotency tanpa menyalakan OpenWA.
 #
-# PERINGATAN: bentuk body webhook OpenWA v4 BELUM direkam dari instance nyata (spike P0).
-# Body di bawah hanya tiruan kasar untuk menguji jalur 204/401/idempotency; ganti dengan
-# rekaman asli dari spike/recordings/ begitu tersedia.
+# Bentuk body diambil dari rekaman nyata spike P0 (tests/fixtures/openwa/), disamarkan dan
+# diringkas ke field yang dibaca server; payload asli berisi sekitar 100 field per pesan.
 #
-# @webhookSecret harus sama dengan WEBHOOK_SECRET di .env. @webhookPath adalah segmen acak
-# di URL yang didaftarkan ke OpenWA (opsi -w).
+# RAHASIA ADA DI PATH, bukan di header: OpenWA v4 tidak bisa mengirim header kustom lewat -w.
+# @webhookSecret harus sama dengan WEBHOOK_SECRET di .env (huruf, angka, "-", "_"). URL yang
+# didaftarkan ke OpenWA: http://localhost:3000/webhooks/openwa/<WEBHOOK_SECRET>
+#
+# Hasil di database (npx prisma studio, tabel message_logs):
+#   - 1: satu baris baru    - 2: tidak bertambah    - 3, 5-8: tidak ada baris baru
+#   - 4b: satu baris baru, isi pesan asli (bukan ciphertext)
 
 @baseUrl = http://localhost:3000
 @webhookSecret = ganti-dengan-rahasia-acak-minimal-16-karakter
-@webhookPath = a7f2k9m3q1
+
+# Hanya untuk blok "Demo idempotency" di bawah (claude/DEMO-SCRIPT.md, langkah 9).
+# @senderPhone: nomor yang SUDAH ditautkan lewat whatsapp.http, tanpa "+" (mis. 628123456789).
+#   Server mengenali pengirim lewat data.sender.phoneNumber; nomor lain dijawab ajakan daftar.
+# @demoRun: ubah (01 -> 02 -> ...) setiap kali demo diulang. data.id menjadi kunci idempotency,
+#   jadi id yang sama dengan latihan sebelumnya dianggap kiriman ulang dan tidak diproses.
+@senderPhone = 628123456789
+@demoRun = 01
 
 ### ============================================================
-### POST /webhooks/openwa/:path
+### POST /webhooks/openwa/:rahasia
 ### ============================================================
 
-# Sukses: 204 (diterima dan disimpan mentah ke message_logs)
-POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
-X-Webhook-Secret: {{webhookSecret}}
+# 1. Pesan chat pribadi: 204, satu baris message_logs (status received), satu job inbound.
+#    Perhatikan: from/chatId berisi LID (...@lid), bukan nomor. Nomor ada di data.sender.phoneNumber.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
 Content-Type: application/json
 
 {
+  "ts": 1791151342627,
+  "sessionId": "session",
+  "id": "53c0ec2b-0afa-416b-ab1a-1575848e281f",
   "event": "onMessage",
-  "sessionId": "cashify-bot",
   "data": {
-    "id": "false_6281234567890@c.us_3EB0A1B2C3D4E5F60789",
-    "from": "6281234567890@c.us",
+    "id": "false_111111111111111@lid_AC0D70512C16BC6E88D19BAF13A5F557",
+    "from": "111111111111111@lid",
+    "to": "628987654321@c.us",
+    "author": "111111111111111@lid",
+    "chatId": "111111111111111@lid",
     "fromMe": false,
     "type": "chat",
     "body": "tadi makan siang 25 ribu",
-    "t": 1790000000
-  }
+    "isGroupMsg": false,
+    "t": 1791151342,
+    "notifyName": "Budi Santoso",
+    "sender": {
+      "id": "628123456789@c.us",
+      "lid": "111111111111111@lid",
+      "phoneNumber": "628123456789@c.us",
+      "pushname": "Budi Santoso"
+    }
+  },
+  "webhook_id": "9455fbeb-3a49-4b6c-afe3-0f3016191a2b"
 }
 
-### Idempotency: kirim ulang body yang SAMA dengan di atas. Harus tetap 204 dan
-### message_logs tetap satu baris (unique session_id + wa_message_id), tanpa transaksi ganda.
-POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
-X-Webhook-Secret: {{webhookSecret}}
+### 2. Idempotency: kirim ulang body yang SAMA persis dengan nomor 1. Tetap 204; message_logs
+###    tetap satu baris (unique session_id + wa_message_id) dan tidak ada job kedua.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
 Content-Type: application/json
 
 {
+  "ts": 1791151342627,
+  "sessionId": "session",
+  "id": "53c0ec2b-0afa-416b-ab1a-1575848e281f",
   "event": "onMessage",
-  "sessionId": "cashify-bot",
   "data": {
-    "id": "false_6281234567890@c.us_3EB0A1B2C3D4E5F60789",
-    "from": "6281234567890@c.us",
+    "id": "false_111111111111111@lid_AC0D70512C16BC6E88D19BAF13A5F557",
+    "from": "111111111111111@lid",
+    "to": "628987654321@c.us",
+    "author": "111111111111111@lid",
+    "chatId": "111111111111111@lid",
     "fromMe": false,
     "type": "chat",
     "body": "tadi makan siang 25 ribu",
-    "t": 1790000000
-  }
+    "isGroupMsg": false,
+    "t": 1791151342,
+    "notifyName": "Budi Santoso",
+    "sender": {
+      "id": "628123456789@c.us",
+      "lid": "111111111111111@lid",
+      "phoneNumber": "628123456789@c.us",
+      "pushname": "Budi Santoso"
+    }
+  },
+  "webhook_id": "9455fbeb-3a49-4b6c-afe3-0f3016191a2b"
 }
 
-### Aturan 6: fromMe true harus diabaikan. Tetap 204, tidak ada job yang masuk antrean.
-POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
-X-Webhook-Secret: {{webhookSecret}}
+### 3. OpenWA mengirim setiap pesan juga sebagai onAnyMessage (id pesan sama). Diabaikan: 204 tanpa efek.
+###    Bila ini ikut diproses, setiap pesan tercatat dua kali.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
 Content-Type: application/json
 
 {
-  "event": "onMessage",
-  "sessionId": "cashify-bot",
+  "ts": 1791151342630,
+  "sessionId": "session",
+  "id": "9d1b3c58-1f4e-4e0a-8f77-3b0f6c1d2a90",
+  "event": "onAnyMessage",
   "data": {
-    "id": "true_6281234567890@c.us_3EB0FFFFFFFFFFFFFFFF",
-    "from": "6281234567890@c.us",
+    "id": "false_111111111111111@lid_AC0D70512C16BC6E88D19BAF13A5F557",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "chat",
+    "body": "tadi makan siang 25 ribu",
+    "isGroupMsg": false
+  },
+  "webhook_id": "9455fbeb-3a49-4b6c-afe3-0f3016191a2b"
+}
+
+### 4a. ciphertext: penanda sementara yang datang SEBELUM pesan aslinya dengan id yang SAMA.
+###     Diabaikan (204, tanpa baris). Bila disimpan, pesan asli di 4b dibuang sebagai "duplikat".
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "ts": 1791151893567,
+  "sessionId": "session",
+  "id": "97ec91b8-53b2-4939-97ce-beef2211c200",
+  "event": "onMessage",
+  "data": {
+    "id": "false_111111111111111@lid_AC414FE0D9E5F4B9E1A2233E20CE435A",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "ciphertext",
+    "body": "",
+    "isGroupMsg": false
+  },
+  "webhook_id": "d38742ae-a9b7-4891-8fd7-e766683f512a"
+}
+
+### 4b. Pesan asli dengan id yang sama dengan 4a: 204, satu baris baru berisi teks aslinya, satu job.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "ts": 1791151894127,
+  "sessionId": "session",
+  "id": "e8c29edf-16fb-482c-ac90-7b3309576f5b",
+  "event": "onMessage",
+  "data": {
+    "id": "false_111111111111111@lid_AC414FE0D9E5F4B9E1A2233E20CE435A",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "chat",
+    "body": "beli bensin 50 ribu",
+    "isGroupMsg": false,
+    "sender": { "phoneNumber": "628123456789@c.us", "lid": "111111111111111@lid" }
+  },
+  "webhook_id": "d38742ae-a9b7-4891-8fd7-e766683f512a"
+}
+
+### 5. Aturan 6: fromMe true harus diabaikan. 204, tanpa baris, tanpa job.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "sessionId": "session",
+  "event": "onMessage",
+  "data": {
+    "id": "true_111111111111111@lid_3EB0DA8EF10DF6862A67CA",
+    "chatId": "111111111111111@lid",
     "fromMe": true,
     "type": "chat",
     "body": "Tercatat: makan siang Rp25.000",
-    "t": 1790000005
+    "isGroupMsg": false
   }
 }
 
-### Error 401: rahasia salah
-POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
-X-Webhook-Secret: rahasia-yang-salah-sama-sekali
+### 6. Pesan grup diabaikan sepenuhnya. 204, tanpa baris.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
 Content-Type: application/json
 
 {
-  "event": "onMessage"
+  "sessionId": "session",
+  "event": "onMessage",
+  "data": {
+    "id": "false_120363000000000001@g.us_AC414FE0D9E5F4B9E1A2233E20CE435A_111111111111111@lid",
+    "chatId": "120363000000000001@g.us",
+    "fromMe": false,
+    "type": "chat",
+    "body": "ini pesan dari grup",
+    "isGroupMsg": true
+  }
 }
 
-### Error 401: header rahasia tidak ada
-POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
+### 7. onAck (status kirim) diabaikan. 204.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
 Content-Type: application/json
 
 {
-  "event": "onMessage"
+  "sessionId": "session",
+  "event": "onAck",
+  "data": { "id": "3EB0DA8EF10DF6862A67CA", "ack": 2, "fromMe": true, "type": "chat" }
 }
+
+### 8. Event yang belum dikenal diabaikan dengan 204, dan namanya dicatat di log level info
+###    (cara mengetahui nama event status sesi v4). data boleh berupa apa saja.
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{ "sessionId": "session", "event": "onStateChanged", "data": "CONFLICT" }
+
+### ============================================================
+### Demo idempotency: satu pesan, dua kiriman, satu transaksi
+### ============================================================
+
+# Prasyarat: API + worker + Redis menyala, @senderPhone sudah ditautkan ke akun demo (whatsapp.http).
+# Balasan bot tiba di WhatsApp nomor itu 2-5 detik setelah tiap pesan yang DIPROSES (jeda antrean outbound).
+# Tanpa `t`/`timestamp`, waktu pesan = waktu diterima server, jadi tanggalnya hari ini.
+#
+# Hasil yang diharapkan (npx prisma studio -> message_logs, atau GET /transactions?q=makan malam):
+#   9a  204  message_logs +1 baris, satu job, SATU balasan konfirmasi ("Balas YA untuk simpan ...")
+#   9b  204  message_logs tetap; tidak ada job, tidak ada balasan kedua
+#   9c  204  message_logs +1 baris; transaksi Rp40.000 tersimpan, balasan "Tersimpan: ..."
+#   9d  204  message_logs tetap; transaksi tetap SATU, tidak ada balasan kedua
+#            (tanpa unique index, "ya" kedua tetap tidak menggandakan transaksi karena pending sudah
+#            terhapus dan transaksi dijaga source_message_id, tetapi bot membalas lagi
+#            "Tidak ada transaksi yang menunggu konfirmasi" dan message_logs bertambah)
+
+### 9a. "makan malam 40 ribu" (pertama kali) -> konfirmasi
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "sessionId": "session",
+  "id": "demo-{{demoRun}}-a",
+  "event": "onMessage",
+  "data": {
+    "id": "false_111111111111111@lid_DEMO{{demoRun}}A",
+    "from": "111111111111111@lid",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "chat",
+    "body": "makan malam 40 ribu",
+    "isGroupMsg": false,
+    "sender": {
+      "phoneNumber": "{{senderPhone}}@c.us",
+      "lid": "111111111111111@lid"
+    }
+  }
+}
+
+### 9b. Kirim ulang 9a PERSIS sama (OpenWA at-least-once): tetap 204, tanpa efek apa pun
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "sessionId": "session",
+  "id": "demo-{{demoRun}}-a",
+  "event": "onMessage",
+  "data": {
+    "id": "false_111111111111111@lid_DEMO{{demoRun}}A",
+    "from": "111111111111111@lid",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "chat",
+    "body": "makan malam 40 ribu",
+    "isGroupMsg": false,
+    "sender": {
+      "phoneNumber": "{{senderPhone}}@c.us",
+      "lid": "111111111111111@lid"
+    }
+  }
+}
+
+### 9c. "ya" (pesan baru, data.id berbeda) -> transaksi tersimpan
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "sessionId": "session",
+  "id": "demo-{{demoRun}}-b",
+  "event": "onMessage",
+  "data": {
+    "id": "false_111111111111111@lid_DEMO{{demoRun}}B",
+    "from": "111111111111111@lid",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "chat",
+    "body": "ya",
+    "isGroupMsg": false,
+    "sender": {
+      "phoneNumber": "{{senderPhone}}@c.us",
+      "lid": "111111111111111@lid"
+    }
+  }
+}
+
+### 9d. Kirim ulang 9c PERSIS sama: 204, transaksi tetap satu
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{
+  "sessionId": "session",
+  "id": "demo-{{demoRun}}-b",
+  "event": "onMessage",
+  "data": {
+    "id": "false_111111111111111@lid_DEMO{{demoRun}}B",
+    "from": "111111111111111@lid",
+    "chatId": "111111111111111@lid",
+    "fromMe": false,
+    "type": "chat",
+    "body": "ya",
+    "isGroupMsg": false,
+    "sender": {
+      "phoneNumber": "{{senderPhone}}@c.us",
+      "lid": "111111111111111@lid"
+    }
+  }
+}
+
+### ============================================================
+### Error
+### ============================================================
+
+### Error 401: rahasia di path salah. Tidak ada efek, juga untuk payload yang valid.
+POST {{baseUrl}}/webhooks/openwa/rahasia-yang-salah-sama-sekali
+Content-Type: application/json
+
+{ "sessionId": "session", "event": "onMessage", "data": {} }
 
 ### Error 400: body bukan JSON yang valid (rahasia benar)
-POST {{baseUrl}}/webhooks/openwa/{{webhookPath}}
-X-Webhook-Secret: {{webhookSecret}}
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
 Content-Type: application/json
 
 { ini bukan json
+
+### Error 400: JSON valid tetapi bukan amplop OpenWA (tanpa event)
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{ "sessionId": "session", "data": {} }
+
+### Error 400: event onMessage dengan data yang bukan pesan (tanpa id, chatId, type, fromMe)
+POST {{baseUrl}}/webhooks/openwa/{{webhookSecret}}
+Content-Type: application/json
+
+{ "sessionId": "session", "event": "onMessage", "data": { "body": "tanpa id" } }
