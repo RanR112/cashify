@@ -6,6 +6,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
+import { Redis } from 'ioredis';
 import type { TestProject } from 'vitest/node';
 import { SYSTEM_CATEGORIES } from '../../prisma/seed-data.js';
 import { assertSafeTestDbUrl, DEFAULT_TEST_DATABASE_URL } from '../helpers/testDb.js';
@@ -14,6 +15,8 @@ declare module 'vitest' {
   export interface ProvidedContext {
     /** URL database test yang sudah termigrasi dan berisi kategori sistem; '' bila tidak tersedia. */
     testDbUrl: string;
+    /** URL Redis yang terjangkau untuk test lock/antrean; '' bila tidak tersedia. */
+    testRedisUrl: string;
   }
 }
 
@@ -29,7 +32,51 @@ async function isReachable(url: string): Promise<boolean> {
   }
 }
 
+export const DEFAULT_TEST_REDIS_URL = 'redis://localhost:6379';
+
+async function isRedisReachable(url: string): Promise<boolean> {
+  // Tanpa retry: Redis yang mati harus ketahuan dalam sekejap, bukan menggantung.
+  const redis = new Redis(url, {
+    lazyConnect: true,
+    connectTimeout: 2000,
+    maxRetriesPerRequest: 0,
+    retryStrategy: () => null,
+  });
+  redis.on('error', () => undefined);
+  try {
+    await redis.connect();
+    return (await redis.ping()) === 'PONG';
+  } catch {
+    return false;
+  } finally {
+    redis.disconnect();
+  }
+}
+
 export default async function setup(project: TestProject): Promise<void> {
+  await setupRedis(project);
+  await setupPostgres(project);
+}
+
+/**
+ * Redis dipakai test lock dan antrean. Test memakai id pengguna acak dan awalan antrean unik,
+ * jadi aman dijalankan pada Redis pengembangan (tidak ada FLUSH); tidak ada yang dihapus selain
+ * kunci miliknya sendiri.
+ */
+async function setupRedis(project: TestProject): Promise<void> {
+  const url = process.env.TEST_REDIS_URL ?? DEFAULT_TEST_REDIS_URL;
+  if (await isRedisReachable(url)) {
+    project.provide('testRedisUrl', url);
+    return;
+  }
+  console.warn(
+    '\n[test] Redis tidak terjangkau; test lock dan antrean dilewati. ' +
+      'Nyalakan dengan: docker compose up -d redis\n',
+  );
+  project.provide('testRedisUrl', '');
+}
+
+async function setupPostgres(project: TestProject): Promise<void> {
   const url = process.env.TEST_DATABASE_URL ?? DEFAULT_TEST_DATABASE_URL;
   assertSafeTestDbUrl(url);
 
