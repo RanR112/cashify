@@ -22,13 +22,6 @@ registry.registerComponent('securitySchemes', 'bearerAuth', {
   description: 'JWT dari Supabase Auth (`session.access_token` hasil login/register).',
 });
 
-registry.registerComponent('securitySchemes', 'webhookSecret', {
-  type: 'apiKey',
-  in: 'header',
-  name: 'X-Webhook-Secret',
-  description: 'Rahasia bersama OpenWA dan server (`WEBHOOK_SECRET`).',
-});
-
 // /health tidak punya modul; bentuk responsnya sama dengan yang sudah ada di app.ts.
 registerRoute({
   method: 'get',

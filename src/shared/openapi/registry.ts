@@ -23,7 +23,9 @@ const ERROR_DESCRIPTION: Record<ErrorCode, string> = {
 
 const SECURITY: Record<AuthKind, NonNullable<RouteConfig['security']>> = {
   jwt: [{ bearerAuth: [] }],
-  webhook: [{ webhookSecret: [] }],
+  // Rahasia webhook ada di segmen path, yang tidak punya padanan di skema keamanan OpenAPI;
+  // dijelaskan di deskripsi endpoint.
+  webhook: [],
   none: [],
 };
 
