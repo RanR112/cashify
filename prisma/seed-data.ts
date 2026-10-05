@@ -29,7 +29,8 @@ export const EXPENSE_CATEGORIES: SystemCategorySeed[] = [
     type: 'expense',
     icon: 'utensils',
     color: '#F97316',
-    keywords: ['makan', 'nasi', 'ayam', 'kopi', 'sarapan', 'jajan', 'gofood', 'grabfood', 'warteg', 'bakso'],
+    // 'mkn', 'lunch', 'coffee': varian umum (typo dan istilah Inggris), ARCHITECTURE.md Bagian 17.
+    keywords: ['makan', 'nasi', 'ayam', 'kopi', 'sarapan', 'jajan', 'gofood', 'grabfood', 'warteg', 'bakso', 'mkn', 'lunch', 'coffee'],
     sortOrder: 1,
   },
   {
