@@ -4,3 +4,5 @@ ram-usage.csv
 *.data.json
 _IGNORE_*
 session.data.json
+open-wa-session.*.json
+.node-persist

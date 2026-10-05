@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "openwa": "wa-automate -p 8002 -w http://localhost:3000/webhook",
+    "openwa": "node -r ./src/ua-preload.cjs node_modules/@open-wa/wa-automate/bin/server.js -p 8002 -w http://localhost:3000/webhook --use-chrome",
     "receiver": "tsx src/receiver.ts",
     "ram": "tsx src/ram-logger.ts",
     "reply": "tsx src/send-reply.ts",
