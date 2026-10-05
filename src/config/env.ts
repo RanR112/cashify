@@ -18,7 +18,13 @@ const envSchema = z.object({
 
   OPENWA_URL: z.string().url(),
   OPENWA_API_KEY: z.string().min(1),
-  WEBHOOK_SECRET: z.string().min(16),
+  // Nilai flag --session-id OpenWA; dipakai untuk mencatat status bot di whatsapp_sessions.
+  OPENWA_SESSION_ID: z.string().min(1).default('myfinance-bot'),
+  // OpenWA v4 tidak bisa mengirim header kustom, jadi rahasia ini menjadi segmen path webhook
+  // (/webhooks/openwa/<WEBHOOK_SECRET>) dan harus aman dipakai di URL.
+  WEBHOOK_SECRET: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{16,}$/, 'minimal 16 karakter huruf, angka, "-" atau "_" (buat dengan: openssl rand -hex 24)'),
 
   LLM_PROVIDER: z.enum(['disabled']).default('disabled'),
   LLM_API_KEY: z.string().optional(),
