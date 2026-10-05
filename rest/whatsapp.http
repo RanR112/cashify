@@ -3,7 +3,20 @@
 # Salin session.access_token dari respons login (auth.http) ke @token.
 # Urutan alur normal: status -> link/request -> (OTP tiba di WhatsApp) -> link/verify
 # -> preferences -> DELETE link. Ganti nomor di bawah dengan nomor WhatsApp Anda sendiri
-# (+62...). Bot hanya mengirim OTP ke nomor yang diminta, maksimal 3 kali per nomor per hari.
+# (+62...). Bot hanya mengirim OTP ke nomor yang diminta, maksimal 3 kali per nomor per hari
+# dan 5 kali per pengguna per hari (link/request dan link/resend sama-sama dihitung).
+#
+# Prasyarat agar OTP benar-benar sampai: Redis (docker compose up -d redis), API (npm run dev),
+# worker (npm run dev:worker, satu instance saja), dan OpenWA yang sudah memindai QR.
+# Respons 200 dari link/request berarti OTP DIANTREKAN; pesannya tiba 2-5 detik kemudian
+# (jeda acak antrean outbound, aturan 12). Kode 6 digit ada di pesan itu; tidak ada di respons.
+#
+# Alur uji kasus error, berurutan, dengan satu pengguna:
+#   1. link/request  -> 200 pending
+#   2. link/verify dengan kode salah 5 kali -> 400 dengan attempts_left 4,3,2,1,0
+#   3. link/verify sekali lagi (bahkan dengan kode benar) -> 429, minta kode baru
+#   4. link/resend dalam 60 detik -> 429 dengan retry_after_seconds
+#   5. tunggu 60 detik, link/resend -> 200 dan kode baru tiba; verify dengan kode baru -> 200
 
 @baseUrl = http://localhost:3000
 @token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
@@ -69,7 +82,18 @@ Content-Type: application/json
   "phone": "+628123456789"
 }
 
+### Error 409 CONFLICT: akun ini sudah tertaut ke sebuah nomor
+### (jalankan setelah verify berhasil; putuskan dulu dengan DELETE /whatsapp/link untuk mengganti nomor)
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+628199999999"
+}
+
 ### Error 429 RATE_LIMITED: kirim request yang sama lebih dari 3 kali dalam sehari
+### (batas 3 per nomor berlaku lintas pengguna; details[].retry_after_seconds = sisa waktu sampai kuota pulih)
 POST {{baseUrl}}/whatsapp/link/request
 Authorization: Bearer {{token}}
 Content-Type: application/json
@@ -78,7 +102,18 @@ Content-Type: application/json
   "phone": "+628123456789"
 }
 
+### Error 429 RATE_LIMITED: lebih dari 5 OTP per pengguna per hari, dengan nomor yang berbeda-beda
+POST {{baseUrl}}/whatsapp/link/request
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "phone": "+628111222333"
+}
+
 ### Error 503 SERVICE_UNAVAILABLE: sesi bot terputus (matikan OpenWA lalu kirim request ini)
+### Status sesi disimpan 10 detik, jadi tunggu sebentar setelah mematikan OpenWA.
+### 503 dijawab SEBELUM kuota harian dipakai dan sebelum baris apa pun ditulis.
 POST {{baseUrl}}/whatsapp/link/request
 Authorization: Bearer {{token}}
 Content-Type: application/json
@@ -101,12 +136,42 @@ Content-Type: application/json
 }
 
 ### Error 400: kode salah, details[].attempts_left menunjukkan sisa percobaan (maksimal 5)
+### Kirim berulang: attempts_left menurun 4, 3, 2, 1, 0.
 POST {{baseUrl}}/whatsapp/link/verify
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
   "code": "000000"
+}
+
+### Error 429 RATE_LIMITED: percobaan salah sudah 5 kali; kode benar pun ditolak, minta kode baru (link/resend)
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "000000"
+}
+
+### Error 404 NOT_FOUND: tidak ada kode yang menunggu, kode sudah kedaluwarsa (lewat 10 menit),
+### atau kode sudah dipakai. Kirim kode apa pun setelah salah satu keadaan itu.
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "123456"
+}
+
+### Error 409 CONFLICT: nomor yang menunggu ini sudah diverifikasi lebih dulu oleh akun lain
+### (dua pengguna meminta kode untuk nomor yang sama; yang pertama memverifikasi menang)
+POST {{baseUrl}}/whatsapp/link/verify
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "code": "483920"
 }
 
 ### Error 400: kode bukan 6 digit
@@ -131,8 +196,9 @@ Content-Type: application/json
 ### POST /whatsapp/link/resend
 ### ============================================================
 
-# Sukses: 200 {status: "pending", expires_at, masked_phone}. Tanpa body.
-# Error 404 bila tidak ada permintaan yang menunggu; 429 bila kurang dari 60 detik sejak kiriman terakhir.
+# Sukses: 200 {status: "pending", expires_at, masked_phone}. Tanpa body. Kode lama langsung tidak berlaku.
+# Error 404 bila tidak ada permintaan yang menunggu; 429 bila kurang dari 60 detik sejak kiriman terakhir
+# (details[].retry_after_seconds) atau kuota harian habis; 503 bila sesi bot terputus.
 POST {{baseUrl}}/whatsapp/link/resend
 Authorization: Bearer {{token}}
 
@@ -182,7 +248,9 @@ Content-Type: application/json
 ### DELETE /whatsapp/link
 ### ============================================================
 
-# Sukses: 204 (soft: status menjadi disabled, riwayat pesan tetap ada)
+# Sukses: 204 (soft: status menjadi disabled, baris tidak dihapus, riwayat pesan tetap ada).
+# Berlaku juga untuk tautan yang masih pending (ganti nomor). Menaut ulang mengulang OTP dari awal
+# dan preferensi kembali mati.
 DELETE {{baseUrl}}/whatsapp/link
 Authorization: Bearer {{token}}
 
