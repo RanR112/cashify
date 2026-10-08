@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch --env-file=.env src/server.ts",
-    "dev:worker": "tsx watch --env-file=.env src/worker.ts",
+    "dev:worker": "docker compose up -d redis && tsx watch --env-file=.env src/worker.ts",
     "openwa": "node scripts/start-openwa.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node --env-file=.env dist/server.js",
