@@ -14,6 +14,7 @@ export function createUsersRouter(service: UsersService, verifyAuth: RequestHand
   router.use(verifyAuth);
   router.get('/', asyncHandler(controller.getMe));
   router.patch('/', validate({ body: updateMeBodySchema }), asyncHandler(controller.updateMe));
+  router.post('/onboarding/complete', asyncHandler(controller.completeOnboarding));
 
   return router;
 }

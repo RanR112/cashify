@@ -1,27 +1,52 @@
-import { jsonBody, jsonResponse, registerRoute } from '../../shared/openapi/registry.js';
-import { userProfileSchema } from '../../shared/schemas/user.schema.js';
-import { updateMeBodySchema } from './users.schema.js';
+import {
+    jsonBody,
+    jsonResponse,
+    registerRoute,
+} from "../../shared/openapi/registry.js";
+import { userProfileSchema } from "../../shared/schemas/user.schema.js";
+import { updateMeBodySchema } from "./users.schema.js";
 
-const TAG = 'Profil';
+const TAG = "Profil";
 
 registerRoute({
-  method: 'get',
-  path: '/me',
-  tag: TAG,
-  summary: 'Profil pengguna',
-  description: 'Identitas diambil dari klaim JWT, tidak pernah dari parameter.',
-  auth: 'jwt',
-  responses: { 200: jsonResponse('Profil.', userProfileSchema) },
-  errors: ['NOT_FOUND'],
+    method: "get",
+    path: "/me",
+    tag: TAG,
+    summary: "Profil pengguna",
+    description:
+        "Identitas diambil dari klaim JWT, tidak pernah dari parameter.",
+    auth: "jwt",
+    responses: { 200: jsonResponse("Profil.", userProfileSchema) },
+    errors: ["NOT_FOUND"],
 });
 
 registerRoute({
-  method: 'patch',
-  path: '/me',
-  tag: TAG,
-  summary: 'Ubah profil',
-  description: 'Mengubah sebagian field: nama, avatar, saldo awal.',
-  auth: 'jwt',
-  request: { body: jsonBody(updateMeBodySchema) },
-  responses: { 200: jsonResponse('Profil setelah diubah.', userProfileSchema) },
+    method: "patch",
+    path: "/me",
+    tag: TAG,
+    summary: "Ubah profil",
+    description: "Mengubah sebagian field: nama, avatar, saldo awal.",
+    auth: "jwt",
+    request: { body: jsonBody(updateMeBodySchema) },
+    responses: {
+        200: jsonResponse("Profil setelah diubah.", userProfileSchema),
+    },
+});
+
+registerRoute({
+    method: "post",
+    path: "/me/onboarding/complete",
+    tag: TAG,
+    summary: "Tandai onboarding selesai",
+    description:
+        'Mengisi `onboarding_completed_at` dengan waktu server. Dipanggil saat pengguna menekan "Selesai" ' +
+        'maupun "Lewati". Tanpa body. Idempoten: bila sudah terisi, nilai pertama dipertahankan.',
+    auth: "jwt",
+    responses: {
+        200: jsonResponse(
+            "Profil setelah onboarding ditandai selesai.",
+            userProfileSchema,
+        ),
+    },
+    errors: ["NOT_FOUND"],
 });
