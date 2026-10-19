@@ -8,6 +8,7 @@ Dokumentasi teknis backend Cashify (nama kode di dokumen rancangan: MyFinance), 
 | Basis audit | Branch `main`, commit terakhir `44204ea`, **ditambah perubahan yang belum di-commit** di working tree (modul `webhooks`, `whatsapp`, `parsers/`, `queues/`, `workers/`, `gateways/`, dan lainnya; lihat `git status`) |
 | Sumber kebenaran | Source code di `src/`, `prisma/schema.prisma`, dan `prisma/migrations/`. Dokumen di `claude/` dipakai hanya sebagai pembanding (Bagian 12) |
 | Status verifikasi | `npm run typecheck` lulus. `npm run test`: 34 berkas lulus, 11 berkas dilewati; 1.316 test lulus, 375 dilewati karena Redis dan Postgres test tidak menyala saat audit |
+| Pembaruan | 19 Oktober 2026: ditambahkan endpoint `POST /me/onboarding/complete` (modul `users`), disusun dari berkas modul yang diberikan pemilik repo. Belum dijalankan `typecheck`, `test`, dan `npm run openapi` setelah perubahan ini |
 
 **Label status yang dipakai di seluruh dokumen:**
 
@@ -335,7 +336,7 @@ backend/
 | Modul | Berkas | Isi |
 | --- | --- | --- |
 | `auth` | 7 | Register, login, Google, refresh, logout, lupa/reset password. Provisioning pengguna baru dalam satu transaksi DB |
-| `users` | 7 | `GET/PATCH /me` |
+| `users` | 7 | `GET/PATCH /me`, `POST /me/onboarding/complete` |
 | `accounts` | 7 | `GET /accounts` (hanya baca) |
 | `categories` | 7 | `GET /categories`, `mergeCategories` (salinan pengguna menang atas kategori sistem), `listWithKeywords` untuk kamus parser |
 | `transactions` | 8 | CRUD + restore, audit log, optimistic locking, cursor; `transactions.summary.ts` untuk agregasi dashboard; metode khusus WhatsApp (`createFromWhatsapp`, `findBySourceMessage`, `latestFromWhatsapp`, `topCategoryIds`) |
@@ -711,7 +712,7 @@ JWT.email ─► req.user.email    (bila ada)
 
 Controller memperoleh identitas hanya lewat `requireUser(req)` (`shared/utils/requestUser.ts`). `user_id` **tidak pernah** dibaca dari body, query, params, atau header lain. Field `user_id` yang dikirim di body dibuang oleh Zod (field tak dikenal di-strip).
 
-`GET /me`, `PATCH /me`, dan `GET /dashboard` juga membutuhkan klaim `email`; token tanpanya dijawab 401 `"Token tidak memuat email"`.
+`GET /me`, `PATCH /me`, `POST /me/onboarding/complete`, dan `GET /dashboard` juga membutuhkan klaim `email`; token tanpanya dijawab 401 `"Token tidak memuat email"`.
 
 ### 6.5 Authorization
 
@@ -763,24 +764,25 @@ Base URL lokal: `http://localhost:3000` (bawaan `HOST=127.0.0.1`, `PORT=3000`). 
 | 10 | POST | `/auth/reset-password` | Setel password baru | — | — | global |
 | 11 | GET | `/me` | Profil | JWT | — | global |
 | 12 | PATCH | `/me` | Ubah profil | JWT | — | global |
-| 13 | GET | `/dashboard` | Ringkasan beranda | JWT | — | global |
-| 14 | GET | `/transactions` | Daftar transaksi | JWT | — | global |
-| 15 | POST | `/transactions` | Buat transaksi | JWT | — | 60/menit/pengguna |
-| 16 | GET | `/transactions/{id}` | Detail transaksi | JWT | — | global |
-| 17 | PATCH | `/transactions/{id}` | Ubah sebagian | JWT | — | global |
-| 18 | DELETE | `/transactions/{id}` | Soft delete | JWT | — | global |
-| 19 | POST | `/transactions/{id}/restore` | Pulihkan | JWT | — | global |
-| 20 | GET | `/categories` | Daftar kategori | JWT | — | global |
-| 21 | GET | `/accounts` | Daftar dompet | JWT | — | global |
-| 22 | GET | `/whatsapp/status` | Status tautan | JWT | — | global |
-| 23 | POST | `/whatsapp/link/request` | Kirim OTP | JWT | — | global + kuota harian di service |
-| 24 | POST | `/whatsapp/link/verify` | Verifikasi OTP | JWT | — | global + 5 percobaan per kode |
-| 25 | POST | `/whatsapp/link/resend` | Kirim ulang OTP | JWT | — | global + jeda 60 detik + kuota harian |
-| 26 | DELETE | `/whatsapp/link` | Putuskan tautan | JWT | — | global |
-| 27 | PATCH | `/whatsapp/preferences` | Sakelar notifikasi | JWT | — | global |
-| 28 | POST | `/webhooks/openwa/{path}` | Penerima event OpenWA | Rahasia di path | — | 300/menit/IP (tanpa global) |
+| 13 | POST | `/me/onboarding/complete` | Tandai onboarding selesai | JWT | — | global |
+| 14 | GET | `/dashboard` | Ringkasan beranda | JWT | — | global |
+| 15 | GET | `/transactions` | Daftar transaksi | JWT | — | global |
+| 16 | POST | `/transactions` | Buat transaksi | JWT | — | 60/menit/pengguna |
+| 17 | GET | `/transactions/{id}` | Detail transaksi | JWT | — | global |
+| 18 | PATCH | `/transactions/{id}` | Ubah sebagian | JWT | — | global |
+| 19 | DELETE | `/transactions/{id}` | Soft delete | JWT | — | global |
+| 20 | POST | `/transactions/{id}/restore` | Pulihkan | JWT | — | global |
+| 21 | GET | `/categories` | Daftar kategori | JWT | — | global |
+| 22 | GET | `/accounts` | Daftar dompet | JWT | — | global |
+| 23 | GET | `/whatsapp/status` | Status tautan | JWT | — | global |
+| 24 | POST | `/whatsapp/link/request` | Kirim OTP | JWT | — | global + kuota harian di service |
+| 25 | POST | `/whatsapp/link/verify` | Verifikasi OTP | JWT | — | global + 5 percobaan per kode |
+| 26 | POST | `/whatsapp/link/resend` | Kirim ulang OTP | JWT | — | global + jeda 60 detik + kuota harian |
+| 27 | DELETE | `/whatsapp/link` | Putuskan tautan | JWT | — | global |
+| 28 | PATCH | `/whatsapp/preferences` | Sakelar notifikasi | JWT | — | global |
+| 29 | POST | `/webhooks/openwa/{path}` | Penerima event OpenWA | Rahasia di path | — | 300/menit/IP (tanpa global) |
 
-Kolom **Role** kosong karena sistem tidak punya role (Bagian 6.5). Endpoint #2 dan #3 tidak tercantum di `claude/API.md`, tetapi terpasang di `src/config/swagger.ts`.
+Kolom **Role** kosong karena sistem tidak punya role (Bagian 6.5). Endpoint #2 dan #3 tidak tercantum di `claude/API.md`, tetapi terpasang di `src/config/swagger.ts`. Endpoint #13 juga tidak tercantum di `claude/API.md`; ia ditambahkan belakangan di modul `users` (Bagian 12.3).
 
 ### 7.2 Konvensi umum
 
@@ -1198,6 +1200,55 @@ Status alur end-to-end (email → redirect → endpoint ini): **Needs Verificati
 | 400 | `VALIDATION_ERROR` | `"Minimal satu field harus diisi"` (`details: [{ issue: "custom" }]`), atau field tidak sah |
 | 401 | `UNAUTHORIZED` | `"Token tidak memuat email"` |
 | 404 | `NOT_FOUND` | `"Profil tidak ditemukan"` |
+
+---
+
+#### `POST /me/onboarding/complete`
+
+| | |
+| --- | --- |
+| Tujuan | Menandai onboarding selesai (tombol "Selesai" maupun "Lewati") dengan mengisi `users.onboarding_completed_at` |
+| Auth | JWT, klaim `email` wajib |
+| Diproses oleh | `users.service.completeOnboarding` → `users.repository.completeOnboarding` |
+| Body | Tidak ada. Waktunya diisi server, jadi klien tidak dapat menentukan nilainya |
+
+**Contoh request**
+
+```http
+POST /me/onboarding/complete
+Authorization: Bearer eyJhbGciOi...
+```
+
+**Respons 200** — `UserProfile` (Bagian 8.1), dengan `onboarding_completed_at` terisi.
+
+```json
+{
+  "id": "9f3c2a1e-6b4d-4e8a-9c1f-0d5e7a8b3c21",
+  "email": "dey@example.com",
+  "full_name": "Dey",
+  "avatar_url": null,
+  "initial_balance": 2350000,
+  "currency": "IDR",
+  "timezone": "Asia/Jakarta",
+  "locale": "id-ID",
+  "onboarding_completed_at": "2026-09-28T05:20:00.000Z",
+  "created_at": "2026-09-28T05:12:35.000Z"
+}
+```
+
+**Pemrosesan:** `updateMany WHERE id = sub AND deleted_at IS NULL AND onboarding_completed_at IS NULL` mengisi `onboarding_completed_at` dengan waktu server, lalu profil dibaca ulang (`findFirst WHERE id = sub AND deleted_at IS NULL`). Endpoint ini **idempoten**: bila kolom sudah terisi, tidak ada yang diubah, nilai pertama dipertahankan, dan profil yang sama dikembalikan. Bila baris `users` tidak ada atau sudah soft-deleted, pembacaan ulang menghasilkan `null` dan dijawab 404.
+
+**Catatan:**
+
+- Tombol "Selesai" dan "Lewati" memanggil endpoint yang sama; backend tidak dapat membedakannya (Bagian 13, P13).
+- Backend tidak memblokir endpoint lain sebelum onboarding ditandai selesai. Saldo awal (`PATCH /me`) dan penautan WhatsApp (`/whatsapp/link/*`) tetap dapat dilakukan kapan saja.
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 401 | `UNAUTHORIZED` | `"Token tidak memuat email"` |
+| 404 | `NOT_FOUND` | `"Profil tidak ditemukan"` (baris `users` tidak ada atau soft-deleted) |
 
 ---
 
@@ -1826,7 +1877,7 @@ Semua skema respons didefinisikan dengan Zod dan menjadi komponen OpenAPI dengan
 | `currency` | string (3) | Tidak | `users.currency` | Bawaan `IDR`; tidak dapat diubah lewat API |
 | `timezone` | string | Tidak | `users.timezone` | Bawaan `Asia/Jakarta`; **tidak dipakai** perhitungan (zona dikunci di `timezone.ts`) |
 | `locale` | string | Tidak | `users.locale` | Bawaan `id-ID` |
-| `onboarding_completed_at` | timestamp | Ya | `users.onboarding_completed_at` | Tidak ada endpoint yang mengisinya |
+| `onboarding_completed_at` | timestamp | Ya | `users.onboarding_completed_at` | `null` sampai `POST /me/onboarding/complete` dipanggil; tidak dapat diubah lewat `PATCH /me` |
 | `created_at` | timestamp | Tidak | `users.created_at` | |
 
 ### 8.2 `Session`
@@ -2144,7 +2195,7 @@ Kolom `created_at` (`TIMESTAMPTZ`, bawaan `now()`) ada di semua tabel kecuali `w
 | `currency` | CHAR(3) | Tidak | `IDR` | |
 | `timezone` | VARCHAR(50) | Tidak | `Asia/Jakarta` | |
 | `locale` | VARCHAR(10) | Tidak | `id-ID` | |
-| `onboarding_completed_at` | TIMESTAMPTZ | Ya | | |
+| `onboarding_completed_at` | TIMESTAMPTZ | Ya | | Diisi waktu server oleh `POST /me/onboarding/complete`; tidak membedakan "Selesai" dan "Lewati" |
 | `updated_at` | TIMESTAMPTZ | Tidak | now | `@updatedAt` |
 | `deleted_at` | TIMESTAMPTZ | Ya | | Soft delete; tidak ada endpoint yang mengisinya |
 
@@ -2302,7 +2353,7 @@ Index: `(entity_type, entity_id)`, `(user_id, created_at DESC)`. Tidak ada endpo
 | Endpoint | Baca | Tulis |
 | --- | --- | --- |
 | `POST /auth/register`, login/google pertama | `users`, `categories` (sistem) | `users`, `accounts`, `categories` |
-| `GET/PATCH /me` | `users` | `users` |
+| `GET/PATCH /me`, `POST /me/onboarding/complete` | `users` | `users` |
 | `GET /dashboard` | `users`, `transactions`, `categories`, `accounts` | — |
 | `/transactions*` | `transactions`, `categories`, `accounts`, `message_logs` | `transactions`, `audit_logs` |
 | `GET /categories` | `categories` | — |
@@ -2610,6 +2661,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | Dashboard `budget_summary` | Ada | Dihilangkan | Changed | `API.md` B5 |
 | Dashboard `recent_transactions` | 5 (`ARCHITECTURE.md` B18), "hingga 10" (`API.md` B5) | 5 | Changed (terhadap `API.md`) | Komentar kode: "beranda menampilkan 5" |
 | Kode `SERVICE_UNAVAILABLE` | 503 tanpa kode | Kode ke-8 | New | `API.md` B1.3 |
+| `POST /me/onboarding/complete` | Tidak ada di `API.md` | Ada (modul `users`) | New | Mengisi `users.onboarding_completed_at`; tanpa body, waktu dari server |
 
 #### WhatsApp dan webhook
 
@@ -2709,7 +2761,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | C14 | Fitur belum selesai | Intent `QUERY` (`/saldo`) dan `CORRECT` dibalas "belum tersedia" | `whatsapp.conversation.ts` | Sesuai Phase 2 |
 | C15 | Endpoint belum lengkap | Tidak ada cara membaca transaksi yang sudah dihapus; restore hanya bisa dengan id yang masih disimpan klien | `transactions.repository.list` selalu `deleted_at IS NULL` | Dicatat juga di `API.md` B12 |
 | C16 | Endpoint belum lengkap | Tidak ada endpoint pembaca `audit_logs`; audit hanya untuk transaksi (penautan WhatsApp tidak diaudit) | — | |
-| C17 | Data model | `users.timezone`, `users.locale`, `users.currency`, `users.onboarding_completed_at`, `transactions.receipt_url`, `whatsapp_sessions.phone_e164` tidak pernah dipakai/diisi kode; zona waktu dikunci di `timezone.ts` | `grep` | Kolom menyesatkan bila klien mengubah zona |
+| C17 | Data model | `users.timezone`, `users.locale`, `users.currency`, `transactions.receipt_url`, `whatsapp_sessions.phone_e164` tidak pernah dipakai/diisi kode; zona waktu dikunci di `timezone.ts` | `grep` | Kolom menyesatkan bila klien mengubah zona |
 | C18 | Inkonsistensi | `GET /dashboard` dapat menghasilkan 404 (profil tidak ada) yang tidak tercantum di OpenAPI | `dashboard.openapi.ts` | Kontrak tidak lengkap |
 | C19 | Inkonsistensi | `README.md` mendokumentasikan `TEST_REDIS_URL`, tetapi `.env.example` tidak memuatnya | Kedua berkas | Minor |
 | C20 | Konvensi | Pola "enam berkas per modul" tidak dipenuhi `dashboard` (tanpa repository) dan `webhooks` (tanpa service), sementara `transactions` dan `whatsapp` punya berkas tambahan | Daftar berkas | Disengaja dan dijelaskan di komentar; perlu disebut di dokumen struktur |
@@ -2732,6 +2784,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | P10 | `req.ip` tanpa `trust proxy` | Di belakang proxy, semua klien berbagi satu IP untuk rate limit | Tidak relevan selama lokal |
 | P11 | Antrean dari proses API | `getQueues()` membuka koneksi BullMQ bersama; `closeSharedQueues()` ada tetapi tidak dipanggil di mana pun, dan `server.ts` tidak punya penanganan shutdown | Potential (kebersihan shutdown) |
 | P12 | Ajakan daftar ke LID | Bila `sender.phoneNumber` tidak ada, ajakan dikirim ke LID; apakah OpenWA dapat mengirim ke LID belum diverifikasi | Needs Verification |
+| P13 | Onboarding tidak membedakan "Selesai" dan "Lewati" | `POST /me/onboarding/complete` hanya mengisi satu timestamp. Pengguna yang melewati onboarding tanpa mengisi saldo awal atau menautkan WhatsApp tidak dapat dibedakan dari yang menyelesaikannya. Membedakannya butuh kolom tambahan lewat `prisma migrate` | Potential |
 
 ### 13.3 Duplikasi dan kandidat refactor
 
@@ -2890,7 +2943,7 @@ Diurutkan dari dampak terbesar terhadap kebenaran dan keamanan.
 
 ## 17. Conclusion
 
-Backend Cashify saat ini adalah implementasi lengkap dari cakupan yang ditetapkan `LOCAL-MODE.md` dan `API.md`: **25 endpoint kontrak + `/health` terpasang**, ditambah Swagger, penerima webhook OpenWA v4 yang idempoten, worker dua antrean dengan pembatasan laju kirim, pipeline parser regex yang murni dan teruji, dan alur percakapan WhatsApp dengan konfirmasi, klarifikasi, dan hapus transaksi terakhir.
+Backend Cashify saat ini adalah implementasi lengkap dari cakupan yang ditetapkan `LOCAL-MODE.md` dan `API.md`: **25 endpoint kontrak + `/health` terpasang**, ditambah `POST /me/onboarding/complete`, Swagger, penerima webhook OpenWA v4 yang idempoten, worker dua antrean dengan pembatasan laju kirim, pipeline parser regex yang murni dan teruji, dan alur percakapan WhatsApp dengan konfirmasi, klarifikasi, dan hapus transaksi terakhir.
 
 Prinsip inti rancangan ditegakkan di kode dan sebagian besar dijaga test: uang sebagai bilangan bulat, nominal dan tanggal dari regex, balasan dari template, webhook tanpa service dengan idempotency di database, `user_id` hanya dari JWT dengan penjaga di repository, soft delete, dan antrean `outbound` concurrency 1 dengan jeda acak.
 
