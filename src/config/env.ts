@@ -16,6 +16,8 @@ const envSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   SUPABASE_JWT_SECRET: z.string().min(1),
 
+  AUTH_RESET_REDIRECT_URL: z.url().optional(),
+
   OPENWA_URL: z.string().url(),
   OPENWA_API_KEY: z.string().min(1),
   // Nilai flag --session-id OpenWA; dipakai untuk mencatat status bot di whatsapp_sessions.

@@ -19,11 +19,11 @@
     "seed": "tsx --env-file=.env prisma/seed.ts",
     "seed:reset": "tsx --env-file=.env prisma/seed.ts --reset",
     "openapi": "tsx scripts/export-openapi.ts",
-
     "dev:all": "concurrently -k -n SERVER,WORKER,OPENWA \"npm run dev\" \"npm run dev:worker\" \"npm run openwa\""
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "9.1.0",
+    "@ngrok/ngrok": "^1.7.0",
     "@prisma/client": "6.19.3",
     "@supabase/supabase-js": "2.117.2",
     "bcryptjs": "3.0.3",

@@ -33,6 +33,18 @@ import { createSessionMonitor } from './modules/whatsapp/whatsapp.session.js';
 import type { OutboundMessage } from './modules/whatsapp/whatsapp.types.js';
 import { createGatewayFromEnv, type WhatsAppGateway } from './gateways/whatsapp/index.js';
 import { enqueueInbound, enqueueOutbound, getQueues, type InboundJobData } from './queues/index.js';
+import ngrok from "@ngrok/ngrok";
+
+async function forwardToApp() {
+  const forwarder = await ngrok.forward({
+    addr: "localhost:3000",
+    authtoken_from_env: true,
+    domain: "cradle-trailing-variety.ngrok-free.dev",
+  });
+  console.log(`Available at: ${forwarder.url()}`);
+}
+
+forwardToApp();
 
 /** Antrean inbound bersama (Redis). Dibuat saat dipakai pertama kali, jadi createApp() tidak butuh Redis. */
 async function enqueueToSharedInbound(data: InboundJobData): Promise<unknown> {
