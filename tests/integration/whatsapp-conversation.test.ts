@@ -12,6 +12,8 @@ import { randomUUID } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
+import type { LlmReplyMode } from '../../src/gateways/llm/index.js';
+import { createMockLlmGateway, type MockLlmGateway } from '../../src/gateways/llm/mock.gateway.js';
 import { createMockGateway, type MockWhatsAppGateway } from '../../src/gateways/whatsapp/mock.gateway.js';
 import { pendingKey } from '../../src/lib/pendingState.js';
 import { userLockKey } from '../../src/lib/userLock.js';
@@ -103,7 +105,9 @@ describe.skipIf(!testDbUrl || !testRedisUrl)('alur percakapan WhatsApp (integras
     return identity.id;
   }
 
-  async function startPipeline(overrides: { disconnectedDelayMs?: number } = {}): Promise<void> {
+  async function startPipeline(
+    overrides: { disconnectedDelayMs?: number; llm?: MockLlmGateway; llmReplyMode?: LlmReplyMode } = {},
+  ): Promise<void> {
     const prefix = `test-${randomUUID()}`;
     connection = new Redis(testRedisUrl, { maxRetriesPerRequest: null });
     redis = new Redis(testRedisUrl, { maxRetriesPerRequest: 3 });
@@ -113,6 +117,8 @@ describe.skipIf(!testDbUrl || !testRedisUrl)('alur percakapan WhatsApp (integras
     pipeline = createInboundPipeline({
       prisma,
       redis,
+      ...(overrides.llm !== undefined && { llm: overrides.llm }),
+      ...(overrides.llmReplyMode !== undefined && { llmReplyMode: overrides.llmReplyMode }),
       enqueueReply: (request) =>
         enqueueOutbound(
           queues.outbound,
@@ -134,6 +140,15 @@ describe.skipIf(!testDbUrl || !testRedisUrl)('alur percakapan WhatsApp (integras
     await workers.ready();
   }
 
+  /** Menutup worker dan koneksi Redis; dipakai afterEach dan test yang mengganti konfigurasi. */
+  async function stopPipeline(): Promise<void> {
+    await workers.close();
+    await Promise.all([queues.inbound.obliterate({ force: true }), queues.outbound.obliterate({ force: true })]);
+    await Promise.all([queues.inbound.close(), queues.outbound.close()]);
+    await redis.quit();
+    await connection.quit();
+  }
+
   beforeEach(async () => {
     await resetUserData(prisma);
     await prisma.messageLog.deleteMany();
@@ -145,12 +160,9 @@ describe.skipIf(!testDbUrl || !testRedisUrl)('alur percakapan WhatsApp (integras
   });
 
   afterEach(async () => {
-    await workers.close();
-    await Promise.all([queues.inbound.obliterate({ force: true }), queues.outbound.obliterate({ force: true })]);
-    await Promise.all([queues.inbound.close(), queues.outbound.close()]);
+    // Hapus kunci selagi koneksi masih terbuka; stopPipeline menutup Redis dan BullMQ.
     await redis.del(pendingKey(userId), userLockKey(userId), ...INVITE_CHATS.map(inviteKey));
-    await redis.quit();
-    await connection.quit();
+    await stopPipeline();
   });
 
   // ---- pembantu ----
@@ -248,6 +260,25 @@ describe.skipIf(!testDbUrl || !testRedisUrl)('alur percakapan WhatsApp (integras
 
       const audit = await prisma.auditLog.findFirstOrThrow({ where: { entityId: tx!.id } });
       expect(audit).toMatchObject({ action: 'create', actorType: 'whatsapp', userId });
+    });
+
+    it('ralat catatan saat konfirmasi mempertahankan nominal dan sumber pesan', async () => {
+      const sourceId = await receive('nasi goreng porsi besar 20k');
+      const first = await nextReply(1);
+      expect(first).toContain('"nasi goreng porsi besar"');
+
+      const edited = await say('catat "nasi goreng + es teh" aja');
+      expect(edited).toContain('Rp20.000');
+      expect(edited).toContain('"nasi goreng + es teh"');
+      expect(await transactions()).toHaveLength(0);
+
+      await say('ya');
+      const [tx] = await transactions();
+      expect(tx).toMatchObject({
+        amount: 20000,
+        description: 'nasi goreng + es teh',
+        sourceMessageId: sourceId,
+      });
     });
 
     it('pesan masuk -> konfirmasi -> batal -> tidak ada transaksi', async () => {
@@ -775,6 +806,61 @@ describe.skipIf(!testDbUrl || !testRedisUrl)('alur percakapan WhatsApp (integras
       await pipeline.markInboundFailed({ message_log_id: id }, new Error('terlambat'));
 
       expect(await messageStatus(id)).toBe('processed');
+    });
+  });
+
+  describe('mode freeform (LLM_REPLY_MODE=freeform)', () => {
+    let llm: MockLlmGateway;
+
+    beforeEach(async () => {
+      // Outer beforeEach sudah menyalakan pipeline mode template; ganti dengan mode freeform.
+      await stopPipeline();
+      llm = createMockLlmGateway();
+      await startPipeline({ llm, llmReplyMode: 'freeform' });
+    });
+
+    it('sapaan dijawab LLM dan sampai ke WhatsApp apa adanya', async () => {
+      const answer = 'Halo! Saya asisten Cashify, siap membantu mencatat pengeluaran.';
+      llm.enqueueChat(answer);
+
+      expect(await say('halo apa kabar')).toBe(answer);
+      expect(llm.chatCalls).toEqual(['halo apa kabar']);
+    });
+
+    it('jawaban LLM yang menyebut nominal dibuang, template yang dikirim', async () => {
+      llm.enqueueChat('Saldo kamu Rp25.000 ya.');
+      expect(await say('saldo')).toContain('belum tersedia lewat WhatsApp');
+    });
+
+    it('jawaban LLM yang gagal jatuh ke template, bukan pesan kosong', async () => {
+      llm.failNextChat(new Error('penyedia mati'));
+      expect(await say('halo apa kabar')).toContain('Belum paham maksudnya');
+    });
+
+    it('alur transaksi tetap deterministik dan nominal tetap dari regex', async () => {
+      await say('tadi makan siang 25 ribu');
+      expect(await say('ya')).toContain('Tersimpan');
+
+      const [tx] = await transactions();
+      expect(tx?.amount).toBe(25000);
+      expect(llm.chatCalls).toEqual([]);
+    });
+
+    it('klasifikasi LLM tetap dipakai untuk kategori, jawaban tetap template', async () => {
+      llm.enqueue({
+        intent: 'CREATE_TRANSACTION',
+        type: 'expense',
+        category_hint: 'makanan',
+        description: 'warteg',
+        confidence: 0.9,
+      });
+
+      const reply = await say('cilok 25rb');
+
+      expect(reply).toContain('Makanan');
+      expect(reply).toContain('Rp25.000');
+      expect(llm.calls).toEqual(['cilok 25rb']);
+      expect(llm.chatCalls).toEqual([]);
     });
   });
 });

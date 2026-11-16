@@ -6,11 +6,16 @@ import {
   createLlmGateway,
   createMockLlmGateway,
   DisabledLlmGateway,
+  LLM_CHAT_MAX_CHARS,
   LLM_CONFIDENCE_THRESHOLD,
   LLM_TIMEOUT_MS,
   LlmClassificationSchema,
+  LlmRequestError,
   parseLlmOutput,
+  safeChat,
   safeClassify,
+  sanitizeChatReply,
+  type LlmOutcome,
 } from '../../src/gateways/llm/index.js';
 
 const valid = {
@@ -133,5 +138,125 @@ describe('MockLlmGateway', () => {
     gateway.reset();
     expect(gateway.calls).toEqual([]);
     expect(await safeClassify(gateway, 'b')).toBeNull();
+  });
+});
+
+describe('safeChat: jawaban bebas hanya dipakai bila layak', () => {
+  it('meneruskan jawaban yang bersih', async () => {
+    const gateway = createMockLlmGateway();
+    gateway.enqueueChat('Halo! Ada yang bisa saya bantu?');
+    expect(await safeChat(gateway, 'halo')).toBe('Halo! Ada yang bisa saya bantu?');
+    expect(gateway.chatCalls).toEqual(['halo']);
+  });
+
+  it.each([
+    ['antrean kosong (jawaban string kosong)', ''],
+    ['hanya spasi', '   \n  '],
+  ])('%s dibuang', async (_name, reply) => {
+    const gateway = createMockLlmGateway();
+    gateway.enqueueChat(reply);
+    expect(await safeChat(gateway, 'x')).toBeNull();
+  });
+
+  it.each([
+    ['Rp25.000', 'Sudah saya catat Rp25.000 ya.'],
+    ['angka ribuan bertitik', 'Totalnya 1.500.000.'],
+    ['angka telanjang empat digit', 'Kodenya 25000.'],
+    ['sufiks ribu', 'Sekitar 25 ribu.'],
+    ['sufiks juta', 'Sekitar 1,5 juta.'],
+  ])('jawaban yang menyebut nominal (%s) dibuang, bukan dikirim', async (_name, reply) => {
+    const gateway = createMockLlmGateway();
+    gateway.enqueueChat(reply);
+    expect(await safeChat(gateway, 'x')).toBeNull();
+  });
+
+  it('galat, timeout, dan gateway tanpa chat semuanya null', async () => {
+    const failing = createMockLlmGateway();
+    failing.failNextChat();
+    expect(await safeChat(failing, 'x')).toBeNull();
+
+    const hanging = createMockLlmGateway();
+    hanging.hangNextChat();
+    expect(await safeChat(hanging, 'x', 20)).toBeNull();
+
+    expect(await safeChat(new DisabledLlmGateway(), 'x')).toBeNull();
+  });
+
+  it('memotong jawaban panjang pada batas kata', async () => {
+    const gateway = createMockLlmGateway();
+    gateway.enqueueChat(`${'kata '.repeat(300)}akhir`);
+    const reply = await safeChat(gateway, 'x');
+    expect(reply).not.toBeNull();
+    expect(reply!.length).toBeLessThanOrEqual(LLM_CHAT_MAX_CHARS);
+    expect(reply!.endsWith('kata')).toBe(true);
+  });
+
+  it('teks balasan tidak pernah sampai ke pengamat log', async () => {
+    const outcomes: LlmOutcome[] = [];
+    const gateway = createMockLlmGateway();
+    gateway.enqueueChat('Jawaban rahasia pengguna');
+    await safeChat(gateway, 'pesan rahasia', undefined, (outcome) => outcomes.push(outcome));
+    expect(outcomes).toEqual([{ status: 'ok' }]);
+    expect(JSON.stringify(outcomes)).not.toContain('rahasia');
+  });
+});
+
+describe('sanitizeChatReply: kebersihan dan guard uang', () => {
+  it('menormalkan baris baru, membuang karakter kontrol, dan memangkas spasi', () => {
+    expect(sanitizeChatReply('\u0000Halo\r\n\r\ndunia\u0007  ')).toBe('Halo\n\ndunia');
+  });
+
+  it('membatasi baris kosong beruntun menjadi satu baris kosong', () => {
+    expect(sanitizeChatReply('a\n\n\n\nb')).toBe('a\n\nb');
+  });
+
+  it.each(['', '   ', '\n\n'])('kosong menjadi null: %j', (raw) => {
+    expect(sanitizeChatReply(raw)).toBeNull();
+  });
+
+  it.each(['Rp 25.000', 'rp25000', '10.000', '10000', '2 juta', '3jt', '50rb', '20 ribu'])(
+    'nominal %j ditolak',
+    (raw) => {
+      expect(sanitizeChatReply(`Catatan: ${raw}`)).toBeNull();
+    },
+  );
+
+  it.each(['Halo, apa kabar?', 'Buka aplikasi Cashify untuk melihat ringkasan.', 'Tahun 2026 penuh semangat'])(
+    'teks tanpa nominal lolos: %j',
+    (raw) => {
+      expect(sanitizeChatReply(raw)).toBe(raw);
+    },
+  );
+});
+
+describe('outcome LLM: untuk log, tanpa isi pesan', () => {
+  it.each<[string, (gateway: ReturnType<typeof createMockLlmGateway>) => void, LlmOutcome]>([
+    ['sukses', (gateway) => gateway.enqueue(valid), { status: 'ok' }],
+    ['skema tidak valid', (gateway) => gateway.enqueue({ ...valid, amount: 1 }), { status: 'invalid' }],
+    ['confidence rendah', (gateway) => gateway.enqueue({ ...valid, confidence: 0.1 }), { status: 'low_confidence' }],
+    ['timeout', (gateway) => gateway.hangNext(), { status: 'timeout' }],
+    ['galat HTTP', (gateway) => gateway.failNext(new LlmRequestError(429)), { status: 'error', httpStatus: 429 }],
+  ])('safeClassify melaporkan %s', async (_name, arrange, expected) => {
+    const outcomes: LlmOutcome[] = [];
+    const gateway = createMockLlmGateway();
+    arrange(gateway);
+    await safeClassify(gateway, 'isi pesan rahasia', 20, (outcome) => outcomes.push(outcome));
+    expect(outcomes).toEqual([expected]);
+    expect(JSON.stringify(outcomes)).not.toContain('rahasia');
+  });
+
+  it('pengamat yang melempar tidak menggagalkan pipeline', async () => {
+    const gateway = createMockLlmGateway();
+    gateway.enqueue(valid);
+    const result = await safeClassify(gateway, 'x', undefined, () => {
+      throw new Error('logger rusak');
+    });
+    expect(result).toEqual(valid);
+  });
+});
+
+describe('createLlmGateway: konfigurasi provider', () => {
+  it('provider groq tanpa kunci gagal saat dibuat, bukan saat pesan pertama', () => {
+    expect(() => createLlmGateway({ provider: 'groq' })).toThrow(/LLM_API_KEY/);
   });
 });

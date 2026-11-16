@@ -13,11 +13,19 @@
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { createBullConnection, createRedisClient } from './config/redis.js';
+import { createLlmGateway, LLM_DEFAULT_MODEL } from './gateways/llm/index.js';
 import { createGatewayFromEnv } from './gateways/whatsapp/index.js';
 import { getPrisma } from './lib/database.js';
-import { createOutboundQueue, enqueueOutbound, QUEUE_NAMES } from './queues/index.js';
+import {
+  createOutboundQueue,
+  createScheduledQueue,
+  enqueueOutbound,
+  QUEUE_NAMES,
+  registerScheduledJobs,
+} from './queues/index.js';
 import { startWorkers } from './workers/index.js';
 import { createInboundPipeline } from './workers/pipeline.js';
+import { createScheduledJobs } from './workers/scheduled.js';
 
 const SHUTDOWN_TIMEOUT_MS = 15_000;
 
@@ -31,9 +39,31 @@ const gateway = createGatewayFromEnv(env);
 // kebutuhannya berlawanan (gagal cepat, lihat config/redis.ts).
 const helperRedis = createRedisClient(env.REDIS_URL);
 const replyQueue = createOutboundQueue(connection);
+const scheduledQueue = createScheduledQueue(connection);
+
+// Cadangan klasifikasi kategori/intent (Bagian 7 tahap 5) dan, bila diminta, jawaban bebas.
+// `LLM_PROVIDER=disabled` berarti tanpa jaringan sama sekali; proses API tidak pernah memakai ini
+// (Bagian 8). Log saat start membuktikan konfigurasi terbaca tanpa mencetak kunci.
+const llmGateway = createLlmGateway({
+  provider: env.LLM_PROVIDER,
+  apiKey: env.LLM_API_KEY,
+  ...(env.LLM_BASE_URL !== undefined && { baseUrl: env.LLM_BASE_URL }),
+  ...(env.LLM_MODEL !== undefined && { model: env.LLM_MODEL }),
+});
+logger.info(
+  {
+    provider: env.LLM_PROVIDER,
+    replyMode: env.LLM_REPLY_MODE,
+    ...(env.LLM_PROVIDER !== 'disabled' && { model: env.LLM_MODEL ?? LLM_DEFAULT_MODEL }),
+  },
+  'Konfigurasi LLM',
+);
+
 const pipeline = createInboundPipeline({
   prisma: getPrisma(),
   redis: helperRedis,
+  llm: llmGateway,
+  llmReplyMode: env.LLM_REPLY_MODE,
   enqueueReply: (request) =>
     enqueueOutbound(
       replyQueue,
@@ -43,6 +73,14 @@ const pipeline = createInboundPipeline({
     ),
 });
 
+// Job berkala memakai service yang sama dengan HTTP, tetapi dirakit di composition root worker
+// (bukan di modul) agar budgets/notifications/transactions tidak saling mengimpor. Semua
+// pengiriman tetap masuk ke antrean outbound di atas.
+const scheduled = createScheduledJobs({
+  prisma: getPrisma(),
+  outbound: replyQueue,
+});
+
 const workers = startWorkers(connection, {
   inbound: { processor: pipeline.processor, onExhausted: pipeline.markInboundFailed },
   outbound: {
@@ -50,7 +88,10 @@ const workers = startWorkers(connection, {
     // Sesi terputus: job ditunda, bukan digugurkan (outbound.worker.ts).
     isConnected: async () => (await gateway.getStatus()).connected,
     onExhausted: pipeline.recordReplyFailure,
+    // Status notifikasi otomatis (pending -> sent/failed); job OTP/balasan bot tidak terpengaruh.
+    notifications: pipeline.notificationStatus,
   },
+  scheduled: { handlers: scheduled.handlers },
 });
 
 let shuttingDown = false;
@@ -71,6 +112,7 @@ async function shutdown(reason: string, exitCode: number): Promise<void> {
   try {
     await workers.close();
     await replyQueue.close();
+    await scheduledQueue.close();
     await helperRedis.quit();
     await connection.quit();
     logger.info('Worker berhenti bersih');
@@ -92,8 +134,7 @@ process.on('unhandledRejection', (reason) => {
   void shutdown('unhandledRejection', 1);
 });
 
-workers
-  .ready()
+Promise.all([registerScheduledJobs(scheduledQueue), workers.ready()])
   .then(() => logger.info({ queues: Object.values(QUEUE_NAMES), redis: 'tersambung' }, 'Worker siap'))
   .catch((err: unknown) => {
     logger.fatal({ err }, 'Worker gagal start');

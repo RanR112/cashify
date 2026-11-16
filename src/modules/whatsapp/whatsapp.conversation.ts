@@ -11,16 +11,25 @@
 //   delete       -> transaksi terakhir yang akan dihapus, menunggu "ya" / "batal"
 // Pending baru menimpa yang lama tanpa pemberitahuan. Tidak ada pengingat saat kedaluwarsa.
 //
-// Nominal dan tanggal SELALU dari parser (regex). LLM tidak terlibat sama sekali (aturan 2), dan
-// semua teks balasan dari whatsapp.templates.ts (aturan 3).
+// Nominal dan tanggal SELALU dari parser (regex); LLM tidak pernah menyentuhnya (aturan 2). LLM
+// hanya menjadi cadangan klasifikasi kategori dan intent ketika kamus kata kunci gagal memutuskan
+// (ARCHITECTURE.md Bagian 7 tahap 5), lewat port `llm` yang dirakit di src/workers/pipeline.ts.
+// Tanpa port itu (proses API, test lama) perilakunya persis seperti sebelumnya. Semua teks balasan
+// tetap dari whatsapp.templates.ts (aturan 3), tidak pernah dari teks LLM — kecuali pengecualian
+// opt-in di bawah.
+//
+// Pengecualian opt-in: `LLM_REPLY_MODE=freeform` merakit `llm.answer`, dan jawaban bebas itu
+// dikirim HANYA untuk pesan yang tidak bisa diproses deterministik (UNKNOWN, QUERY, CORRECT tanpa
+// pending). Jalur transaksi, konfirmasi, hapus, command, dan media tidak pernah memakainya.
 
 import { z } from 'zod';
 import { classifyCategory, extractAmount, normalize, parseMessage } from '../../parsers/index.js';
-import type { CategoryDictionary, ParseResult, RejectReason, TransactionType } from '../../parsers/types.js';
+import type { CategoryDictionary, Intent, ParseResult, RejectReason, TransactionType } from '../../parsers/types.js';
 import { addDays, toJakartaDate } from '../../shared/utils/timezone.js';
 import * as reply from './whatsapp.templates.js';
 import type {
   ConversationCategory,
+  ConversationLlm,
   ConversationOutcome,
   ConversationPorts,
   ConversationTransaction,
@@ -63,6 +72,7 @@ export const pendingSchema = z.discriminatedUnion('kind', [
 
 export type Pending = z.infer<typeof pendingSchema>;
 type Draft = Extract<Pending, { kind: 'amount' }>['draft'];
+type EditablePending = Extract<Pending, { kind: 'amount' }> | Extract<Pending, { kind: 'confirmation' }>;
 
 export interface PendingPort {
   get(userId: string): Promise<Pending | null>;
@@ -74,6 +84,8 @@ export interface ConversationDeps extends ConversationPorts {
   pending: PendingPort;
   /** Memasukkan balasan ke antrean `outbound`. Bukan memanggil gateway (aturan 10). */
   reply: (request: ReplyRequest) => Promise<unknown>;
+  /** Cadangan LLM; tidak ada di proses API dan di test lama (perilaku tetap deterministik). */
+  llm?: ConversationLlm;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +95,27 @@ export interface ConversationDeps extends ConversationPorts {
 const AWAITING = { confirmation: 'confirmation', delete: 'confirmation', category: 'category', amount: 'amount' } as const;
 
 const CATEGORY_NUMBER = /^\d{1,2}$/;
+
+/**
+ * Awalan eksplisit untuk mengubah catatan pending. Hanya berlaku saat pending nominal/konfirmasi
+ * dan pesan tidak memuat nominal; tanpa awalan ini, pesan tetap diperlakukan seperti biasa supaya
+ * transaksi baru tidak berubah menjadi edit.
+ */
+const DESCRIPTION_EDIT = /^(?:tolong\s+|mohon\s+)?catat(?:in|kan|lah)?\b/i;
+
+/**
+ * Intent yang boleh datang dari LLM sebagai cadangan. `UNKNOWN` tidak ikut supaya jawaban "tidak
+ * tahu" tidak memicu panggilan kedua, dan `CREATE_TRANSACTION` tidak ikut karena tanpa nominal
+ * (yang selalu dari regex) tidak ada yang bisa dikerjakan.
+ */
+const LLM_INTENTS: ReadonlySet<Exclude<Intent, 'CREATE_TRANSACTION'>> = new Set([
+  'CONFIRM',
+  'CANCEL',
+  'QUERY',
+  'CORRECT',
+  'DELETE',
+  'HELP',
+]);
 
 const toDictionary = (categories: readonly ConversationCategory[]): CategoryDictionary =>
   categories.map(({ slug, name, type, keywords }) => ({ slug, name, type, keywords }));
@@ -132,6 +165,73 @@ function savedView(record: ConversationTransaction, categorySlug: string, assume
 
 export function createConversation(deps: ConversationDeps) {
   const { pending: store, transactions } = deps;
+  const llm = deps.llm;
+
+  /**
+   * Cadangan kategori dari LLM, dipakai HANYA ketika kamus kata kunci gagal (Bagian 7 tahap 5).
+   * `category_hint` dicocokkan ke kategori milik pengguna yang tipenya sama; hint yang tidak
+   * dikenal diabaikan, tidak pernah menciptakan kategori baru.
+   */
+  async function hintCategory(
+    text: string,
+    categories: readonly ConversationCategory[],
+    type: TransactionType,
+  ): Promise<ConversationCategory | undefined> {
+    if (!llm) return undefined;
+    const hint = await llm.hint(text);
+    const wanted = hint?.categoryHint.trim().toLowerCase() ?? '';
+    if (wanted === '') return undefined;
+    const pool = categories.filter((category) => category.type === type);
+    const matched = classifyCategory(wanted, toDictionary(pool));
+    const slug = matched.status === 'matched' ? matched.slug : pool.find((category) => category.name.toLowerCase() === wanted)?.slug;
+    return slug === undefined ? undefined : pool.find((category) => category.slug === slug);
+  }
+
+  /** Cadangan intent dari LLM, dipakai HANYA ketika regex tidak memutuskan (parseMessage -> UNKNOWN). */
+  async function hintIntent(text: string): Promise<Exclude<Intent, 'CREATE_TRANSACTION'> | undefined> {
+    if (!llm) return undefined;
+    const hint = await llm.hint(text);
+    const intent = hint?.intent as Exclude<Intent, 'CREATE_TRANSACTION'> | undefined;
+    return intent !== undefined && LLM_INTENTS.has(intent) ? intent : undefined;
+  }
+
+  /**
+   * Jawaban bebas dari LLM (hanya `LLM_REPLY_MODE=freeform`). `null` berarti tidak ada jawaban
+   * layak; pemanggil memakai template. Tidak pernah dipakai pada jalur transaksi atau konfirmasi,
+   * dan teksnya tidak pernah diparse.
+   */
+  async function freeform(text: string): Promise<string | null> {
+    if (!llm?.answer) return null;
+    try {
+      return await llm.answer(text);
+    } catch {
+      // Port seharusnya tidak melempar (safeChat menangkap semua), tetapi percakapan tidak boleh
+      // gagal hanya karena implementasi port keliru.
+      return null;
+    }
+  }
+
+  /** Mengubah catatan pending tanpa menyentuh nominal, kategori, tanggal, atau sumber pesan. */
+  async function editPendingDescription(
+    msg: IncomingText,
+    current: EditablePending,
+    description: string,
+    categories: readonly ConversationCategory[],
+    today: string,
+  ): Promise<string> {
+    if (current.kind === 'amount') {
+      const draft: Draft = { ...current.draft, description };
+      await store.set(msg.userId, { kind: 'amount', draft });
+      const category = draft.categorySlug ? findCategory(categories, draft.categorySlug, draft.type) : undefined;
+      return reply.askAmount({ description, categoryName: category?.name });
+    }
+
+    const draft = { ...current.draft, description };
+    const category = findCategory(categories, draft.categorySlug, draft.type);
+    if (!category) return askCategory(msg, categories, draft, today);
+    await store.set(msg.userId, { kind: 'confirmation', draft });
+    return reply.confirmation(toView(draft, draft.amount, category), today);
+  }
 
   /** Tiga kategori yang ditawarkan: yang paling sering dipakai pengguna, dilengkapi urutan bawaan. */
   async function pickOptions(
@@ -226,6 +326,10 @@ export function createConversation(deps: ConversationDeps) {
           ...(result.categorySlug !== undefined && { categorySlug: result.categorySlug }),
         };
         if (result.ask === 'category' && result.amount !== undefined) {
+          // Kamus tidak mengenali kategorinya: LLM boleh menyebut kategori, tetapi hanya yang
+          // benar-benar ada. Gagal berarti bertanya seperti biasa.
+          const hinted = await hintCategory(msg.text, categories, result.type);
+          if (hinted) return askConfirmation(msg, draft, result.amount, hinted, today);
           return askCategory(msg, categories, { ...draft, amount: result.amount }, today);
         }
         await store.set(msg.userId, { kind: 'amount', draft });
@@ -268,10 +372,16 @@ export function createConversation(deps: ConversationDeps) {
 
       case 'HELP':
         return reply.help();
-      case 'QUERY':
-        return reply.queryUnavailable();
-      case 'CORRECT':
-        return reply.correctUnavailable();
+      case 'QUERY': {
+        // Mode freeform boleh menjawab bebas, tetapi tidak saat ada transaksi yang menunggu
+        // konfirmasi: jawaban obrolan akan mengaburkan pertanyaan YA/BATAL.
+        const answerText = current ? null : await freeform(msg.text);
+        return answerText ?? reply.queryUnavailable();
+      }
+      case 'CORRECT': {
+        const answerText = current ? null : await freeform(msg.text);
+        return answerText ?? reply.correctUnavailable();
+      }
       case 'UNKNOWN':
         // Sedang di tengah percakapan: ingatkan pertanyaannya, jangan jatuh ke panduan umum.
         if (current?.kind === 'amount') return reply.askAmountAgain();
@@ -279,7 +389,14 @@ export function createConversation(deps: ConversationDeps) {
           return reply.askCategoryAgain({ options: optionNames(categories, current) }, reply.CATEGORY_NOT_FOUND);
         }
         if (current) return reply.confirmationStillWaiting();
-        return reply.unknownMessage();
+        // Command tak dikenal ("/foo") bukan bahasa alami: tetap tidak ditebak.
+        if (msg.text.trimStart().startsWith('/')) return reply.unknownMessage();
+        const hinted = await hintIntent(msg.text);
+        if (hinted) return handleIntent(msg, { outcome: 'intent', intent: hinted, original: result.original }, categories, today);
+        // Klasifikasi tidak menemukan aksi yang bisa dijalankan: mode freeform boleh menjawab
+        // bebas; gagal berarti panduan singkat seperti sebelumnya.
+        const answerText = await freeform(msg.text);
+        return answerText ?? reply.unknownMessage();
     }
   }
 
@@ -367,7 +484,9 @@ export function createConversation(deps: ConversationDeps) {
         const matched = classifyCategory(text, dictionary);
         if (matched.status === 'matched') slug = matched.slug;
       }
-      const category = slug ? findCategory(categories, slug, type) : undefined;
+      // Jawaban yang tetap tidak dikenali kamus dicoba ke LLM; gagal berarti tanya lagi.
+      const category =
+        (slug ? findCategory(categories, slug, type) : undefined) ?? (await hintCategory(msg.text, categories, type));
       if (!category) return reply.askCategoryAgain({ options: names }, reply.CATEGORY_NOT_FOUND);
 
       return askConfirmation(msg, current.draft, current.draft.amount, category, today);
@@ -411,6 +530,25 @@ export function createConversation(deps: ConversationDeps) {
       const parseResult = result as unknown as Record<string, unknown>;
 
       if (result.outcome === 'ignored') return done(msg, null, 'IGNORED', parseResult);
+
+      // "catat ... aja" saat pending nominal/konfirmasi adalah ralat catatan, bukan transaksi baru.
+      // Nominal tetap wajib lewat regex; di sini pesan justru tidak boleh memuat nominal.
+      if (
+        current !== null &&
+        (current.kind === 'amount' || current.kind === 'confirmation') &&
+        result.outcome === 'clarify' &&
+        result.ask === 'amount' &&
+        result.ambiguousAmount === undefined &&
+        DESCRIPTION_EDIT.test(normalize(msg.text).text)
+      ) {
+        const text =
+          result.description === ''
+            ? current.kind === 'amount'
+              ? reply.askAmountAgain()
+              : reply.confirmationStillWaiting()
+            : await editPendingDescription(msg, current, result.description, categories, today);
+        return done(msg, text, result.intent, parseResult);
+      }
 
       const text = await handleParsed(msg, result, categories, today);
       return done(msg, text, result.intent, parseResult);

@@ -1,6 +1,6 @@
 # Cashify Backend
 
-Cashify adalah API keuangan pribadi dengan dua kanal masuk ke satu sistem yang sama: aplikasi mobile lewat REST, dan WhatsApp lewat webhook OpenWA. Pengguna mengirim pesan seperti `tadi makan siang 25 ribu` ke nomor bot; sistem membaca nominal dan tanggalnya dengan regex, mencocokkan kategori lewat kamus kata kunci, meminta konfirmasi lewat chat, lalu menyimpan transaksinya setelah pengguna membalas `ya`. Kalau pesannya kurang jelas (`keluar 50 ribu`), bot bertanya, bukan menebak. Nominal dan tanggal tidak pernah ditentukan model bahasa, dan LLM dimatikan secara default. Proyek kuliah: seluruh layanan gratis dan berjalan di lokal (Node.js 22, TypeScript, Express, Prisma, Supabase, Redis, BullMQ, OpenWA). Batasan lengkapnya ada di [claude/LOCAL-MODE.md](claude/LOCAL-MODE.md).
+Cashify adalah API keuangan pribadi dengan dua kanal masuk ke satu sistem yang sama: aplikasi mobile lewat REST, dan WhatsApp lewat webhook OpenWA. Pengguna mengirim pesan seperti `tadi makan siang 25 ribu` ke nomor bot; sistem membaca nominal dan tanggalnya dengan regex, mencocokkan kategori lewat kamus kata kunci, meminta konfirmasi lewat chat, lalu menyimpan transaksinya setelah pengguna membalas `ya`. Kalau pesannya kurang jelas (`keluar 50 ribu`), bot bertanya, bukan menebak. Nominal dan tanggal tidak pernah ditentukan model bahasa, dan LLM dimatikan secara default. Bila diaktifkan (`LLM_PROVIDER=groq`), LLM hanya menjadi cadangan klasifikasi; dengan `LLM_REPLY_MODE=freeform` (opt-in) ia juga menjawab pesan yang tidak bisa diproses deterministik, tetap tanpa akses nominal atau data pengguna. Proyek kuliah: seluruh layanan gratis dan berjalan di lokal (Node.js 22, TypeScript, Express, Prisma, Supabase, Redis, BullMQ, OpenWA). Batasan lengkapnya ada di [claude/LOCAL-MODE.md](claude/LOCAL-MODE.md).
 
 Skenario demo langkah demi langkah: [claude/DEMO-SCRIPT.md](claude/DEMO-SCRIPT.md).
 
@@ -21,7 +21,7 @@ flowchart LR
     end
     WHATSAPP["WhatsApp"]
     SB[("Supabase<br/>PostgreSQL + Auth")]
-    LLM["LLM<br/>dimatikan"]
+    LLM["LLM (opsional)<br/>klasifikasi + jawaban bebas"]
 
     REST -->|"REST + JWT"| API
     OWA -->|"webhook onMessage"| API
@@ -31,7 +31,7 @@ flowchart LR
     OWA <--> WHATSAPP
     API --> SB
     WORKER --> SB
-    WORKER -.->|"tidak dipakai (LOCAL-MODE)"| LLM
+    WORKER -.->|"opsional: klasifikasi + freeform"| LLM
 ```
 
 Webhook dipotong menjadi dua fase supaya pemrosesan yang lambat tidak pernah menahan respons HTTP, dan supaya kiriman ulang dari OpenWA (yang bersifat at-least-once) tidak menggandakan apa pun:
@@ -67,7 +67,7 @@ Bentuk webhook yang berlaku adalah hasil rekaman OpenWA v4 nyata, bukan yang dig
 | --- | --- |
 | Uang adalah bilangan bulat rupiah (`Int`) | `prisma/schema.prisma`, `src/shared/utils/money.ts` |
 | Nominal dan tanggal dari regex, bukan LLM | `src/parsers/` (fungsi murni, tanpa impor modul lain) |
-| Balasan dari template, bukan teks LLM | `src/modules/whatsapp/whatsapp.templates.ts` |
+| Balasan dari template; teks LLM hanya opt-in `freeform` untuk pesan non-deterministik | `src/modules/whatsapp/whatsapp.templates.ts`, `src/gateways/llm/llm.gateway.ts` |
 | Webhook cepat, tanpa service | `src/modules/webhooks/webhooks.controller.ts` |
 | Idempotency di database | unique `(session_id, wa_message_id)` pada `message_logs` |
 | `fromMe` dan grup diabaikan | `classify()` di `webhooks.controller.ts` |
@@ -141,8 +141,11 @@ Semua dibaca dan divalidasi Zod di [src/config/env.ts](src/config/env.ts) saat b
 | `OPENWA_API_KEY` | ya | | Karang sendiri; nilai yang sama dipakai di flag `-k` OpenWA |
 | `OPENWA_SESSION_ID` | tidak | `myfinance-bot` | Nilai yang sama dengan flag `--session-id` OpenWA; dipakai mencatat status bot |
 | `WEBHOOK_SECRET` | ya | | Minimal 16 karakter `[A-Za-z0-9_-]`. Buat dengan `openssl rand -hex 24`. Menjadi segmen path webhook |
-| `LLM_PROVIDER` | tidak | `disabled` | Satu-satunya nilai yang valid saat ini: `disabled` |
-| `LLM_API_KEY` | tidak | | Tidak dipakai selama LLM dimatikan |
+| `LLM_PROVIDER` | tidak | `disabled` | `disabled` atau `groq`. `groq` butuh `LLM_API_KEY`; tanpa kunci aplikasi menolak boot |
+| `LLM_API_KEY` | tidak | | Kunci API Groq. Hanya dibaca worker; jangan di-commit atau dikirim ke klien |
+| `LLM_BASE_URL` | tidak | `https://api.groq.com/openai/v1` | Opsional; untuk penyedia kompatibel OpenAI |
+| `LLM_MODEL` | tidak | `qwen/qwen3.8-27b` | Opsional; model Groq |
+| `LLM_REPLY_MODE` | tidak | `template` | `template` = semua balasan dari template. `freeform` = LLM menjawab sapaan/obrolan/QUERY/CORRECT tanpa pending (butuh provider != `disabled`). Lihat [SYSTEM_DOCUMENTATION.md](SYSTEM_DOCUMENTATION.md) bagian 10.5 |
 | `TEST_DATABASE_URL` | tidak | `localhost:54329` | Hanya untuk test integrasi. Harus `localhost`/`127.0.0.1`: test menghapus isi tabel |
 | `TEST_REDIS_URL` | tidak | `localhost:6379` | Hanya untuk test yang butuh Redis |
 | `DEMO_EMAIL`, `DEMO_PASSWORD` | tidak | lihat di bawah | Hanya dibaca `npm run seed`; ganti bila Supabase menolak domain email bawaan |

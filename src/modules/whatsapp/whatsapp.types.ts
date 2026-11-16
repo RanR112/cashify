@@ -214,3 +214,31 @@ export interface ConversationOutcome {
   intent: string;
   parseResult: Record<string, unknown>;
 }
+
+// ---------------------------------------------------------------------------
+// Cadangan LLM (whatsapp.conversation.ts, ARCHITECTURE.md Bagian 7 tahap 5)
+// ---------------------------------------------------------------------------
+// Modul ini tetap tidak mengimpor `gateways/llm`: bentuknya berdiri sendiri dan dirakit di
+// src/workers/pipeline.ts, seperti port lain. Yang sampai ke percakapan sudah lewat `safeClassify`
+// (validasi skema, ambang confidence 0,7, timeout 3 detik), jadi percakapan hanya perlu tahu
+// "ada saran yang layak" atau "tidak ada".
+
+/** Saran LLM yang sudah layak dipakai. Tidak punya nominal maupun tanggal (lihat llm.gateway.ts). */
+export interface ConversationLlmHint {
+  intent: string;
+  type: 'income' | 'expense';
+  categoryHint: string;
+  description: string;
+  confidence: number;
+}
+
+export interface ConversationLlm {
+  /** `null` berarti LLM tidak membantu; perlakukan sama seperti tidak ada LLM: tanya pengguna. */
+  hint(text: string): Promise<ConversationLlmHint | null>;
+  /**
+   * Jawaban bebas untuk pesan yang tidak bisa diproses deterministik (UNKNOWN, QUERY, CORRECT).
+   * Hanya dirakit bila `LLM_REPLY_MODE=freeform`; `null` berarti pakai template. Teks ini TIDAK
+   * pernah diparse untuk nominal/tanggal dan tidak boleh dipakai di jalur transaksi.
+   */
+  answer?(text: string): Promise<string | null>;
+}

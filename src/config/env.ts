@@ -28,9 +28,42 @@ const envSchema = z.object({
     .string()
     .regex(/^[A-Za-z0-9_-]{16,}$/, 'minimal 16 karakter huruf, angka, "-" atau "_" (buat dengan: openssl rand -hex 24)'),
 
-  LLM_PROVIDER: z.enum(['disabled']).default('disabled'),
+  // LLM sebagai cadangan klasifikasi kategori/intent (ARCHITECTURE.md Bagian 7 tahap 5), dijalankan
+  // hanya oleh worker. `disabled` berarti tanpa jaringan sama sekali (LOCAL-MODE.md). Menambah
+  // penyedia lain cukup menambah nilainya di enum ini dan satu gateway.
+  LLM_PROVIDER: z.enum(['disabled', 'groq']).default('disabled'),
   LLM_API_KEY: z.string().optional(),
-});
+  /** Kosong berarti bawaan penyedia (Groq: https://api.groq.com/openai/v1). */
+  LLM_BASE_URL: z.url().optional(),
+  /** Kosong berarti bawaan penyedia. Lihat SYSTEM_DOCUMENTATION.md bagian 10.5. */
+  LLM_MODEL: z.string().min(1).optional(),
+  /**
+   * `template` (bawaan): LLM hanya mengklasifikasi; semua teks balasan dari whatsapp.templates.ts.
+   * `freeform`: LLM menjawab bebas untuk pesan yang tidak bisa diproses deterministik. Mode ini
+   * menyimpang dari aturan proyek 3 dan karena itu opt-in (SYSTEM_DOCUMENTATION.md 10.5).
+   */
+  LLM_REPLY_MODE: z.enum(['template', 'freeform']).default('template'),
+})
+  .superRefine((value, ctx) => {
+    // `LLM_PROVIDER` selain `disabled` tanpa kunci hanya akan gagal saat pesan pertama masuk;
+    // lebih baik gagal saat start. String kosong (`LLM_API_KEY=`) dianggap belum diisi.
+    if (value.LLM_PROVIDER !== 'disabled' && !value.LLM_API_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['LLM_API_KEY'],
+        message: 'wajib diisi bila LLM_PROVIDER bukan "disabled"',
+      });
+    }
+    // Tanpa gateway, mode freeform tidak akan pernah punya jawaban; jangan biarkan salah
+    // konfigurasi tampak seperti "LLM-nya jelek".
+    if (value.LLM_REPLY_MODE === 'freeform' && value.LLM_PROVIDER === 'disabled') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['LLM_REPLY_MODE'],
+        message: 'freeform membutuhkan LLM_PROVIDER selain "disabled"',
+      });
+    }
+  });
 
 export type Env = z.infer<typeof envSchema>;
 

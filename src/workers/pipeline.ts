@@ -8,16 +8,19 @@
 import type { PrismaClient } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import { logger } from '../config/logger.js';
+import { safeChat, safeClassify, type LlmGateway, type LlmOutcome, type LlmReplyMode } from '../gateways/llm/index.js';
 import { createPendingStore } from '../lib/pendingState.js';
 import type { WithUserLockOptions } from '../lib/userLock.js';
 import { createAccountsRepository } from '../modules/accounts/accounts.repository.js';
 import { createCategoriesRepository } from '../modules/categories/categories.repository.js';
 import { mergeCategories } from '../modules/categories/categories.service.js';
+import { createNotificationsRepository } from '../modules/notifications/notifications.repository.js';
+import type { NotificationStatusPort } from '../modules/notifications/notifications.types.js';
 import { createTransactionsRepository } from '../modules/transactions/transactions.repository.js';
 import { createTransactionsService } from '../modules/transactions/transactions.service.js';
 import { createConversation, pendingSchema } from '../modules/whatsapp/whatsapp.conversation.js';
 import { createWhatsappRepository } from '../modules/whatsapp/whatsapp.repository.js';
-import type { ConversationPorts, ReplyRequest } from '../modules/whatsapp/whatsapp.types.js';
+import type { ConversationLlm, ConversationPorts, ReplyRequest } from '../modules/whatsapp/whatsapp.types.js';
 import { isAppError } from '../shared/errors/AppError.js';
 import type { InboundJobData } from '../queues/inbound.queue.js';
 import type { OutboundJobData } from '../queues/outbound.queue.js';
@@ -30,6 +33,16 @@ export interface InboundPipelineDeps {
   redis: Redis;
   /** Memasukkan balasan ke antrean `outbound`. Pipeline tidak pernah memanggil gateway (aturan 10). */
   enqueueReply: (request: ReplyRequest) => Promise<unknown>;
+  /**
+   * Gateway LLM untuk cadangan kategori/intent. Tidak diisi berarti tanpa LLM sama sekali
+   * (`DisabledLlmGateway` juga tidak memberi saran); hanya src/worker.ts yang mengisinya.
+   */
+  llm?: LlmGateway;
+  /**
+   * `freeform` merakit port jawaban bebas dari gateway yang punya `chat`. Bawaan `template`:
+   * perilaku persis seperti sebelum mode ini ada. Lihat config/env.ts.
+   */
+  llmReplyMode?: LlmReplyMode;
   lock?: WithUserLockOptions;
   now?: () => Date;
 }
@@ -40,11 +53,17 @@ export interface InboundPipeline {
   markInboundFailed(data: InboundJobData, error: Error): Promise<void>;
   /** Balasan gagal terkirim permanen: catat di pesan pemicunya. */
   recordReplyFailure(data: OutboundJobData, error: Error): Promise<void>;
+  /**
+   * Status notifikasi otomatis untuk worker outbound. Dirakit di sini karena hanya composition
+   * root yang boleh mempertemukan modul notifications dengan worker.
+   */
+  notificationStatus: NotificationStatusPort;
 }
 
 export function createInboundPipeline(deps: InboundPipelineDeps): InboundPipeline {
   const { prisma, redis } = deps;
   const whatsappRepository = createWhatsappRepository(prisma);
+  const notificationsRepository = createNotificationsRepository(prisma);
   const transactions = createTransactionsService(createTransactionsRepository(prisma));
   const categories = createCategoriesRepository(prisma);
   const accounts = createAccountsRepository(prisma);
@@ -85,10 +104,54 @@ export function createInboundPipeline(deps: InboundPipelineDeps): InboundPipelin
     },
   };
 
+  // Cadangan LLM dibungkus `safeClassify` satu kali di sini: timeout 3 detik, ambang confidence
+  // 0,7, dan validasi skema semuanya berlaku sebelum saran sampai ke percakapan. Tanpa gateway,
+  // port-nya tidak dirakit dan percakapan berjalan persis seperti sebelum LLM ada.
+  const llmGateway = deps.llm;
+
+  /**
+   * Log status panggilan LLM tanpa isi pesan, nomor, atau kunci. Hanya kode alasan dan status HTTP,
+   * supaya kegagalan integrasi (kunci salah, 429, model tidak ada) terlihat di log alih-alih
+   * tampak seperti "bot tidak paham".
+   */
+  const logLlmOutcome = (kind: 'classify' | 'chat', outcome: LlmOutcome): void => {
+    const fields = {
+      llmCall: kind,
+      llmOutcome: outcome.status,
+      ...(outcome.status === 'error' && outcome.httpStatus !== undefined && { httpStatus: outcome.httpStatus }),
+    };
+    if (outcome.status === 'error' || outcome.status === 'timeout') {
+      logger.warn(fields, 'Panggilan LLM gagal, memakai perilaku aman');
+    } else {
+      logger.debug(fields, 'Hasil panggilan LLM');
+    }
+  };
+
+  const llm: ConversationLlm | undefined = llmGateway && {
+    hint: async (text) => {
+      const result = await safeClassify(llmGateway, text, undefined, (outcome) => logLlmOutcome('classify', outcome));
+      return (
+        result && {
+          intent: result.intent,
+          type: result.type,
+          categoryHint: result.category_hint,
+          description: result.description,
+          confidence: result.confidence,
+        }
+      );
+    },
+    // Jawaban bebas hanya dirakit bila diminta. Tanpa `chat` (DisabledLlmGateway) `safeChat`
+    // mengembalikan null, sehingga percakapan memakai template.
+    ...(deps.llmReplyMode === 'freeform' && {
+      answer: (text: string) => safeChat(llmGateway, text, undefined, (outcome) => logLlmOutcome('chat', outcome)),
+    }),
+  };
+
   const conversation = createConversation({
     ...ports,
     pending: createPendingStore(redis, pendingSchema),
     reply: deps.enqueueReply,
+    ...(llm && { llm }),
   });
 
   return {
@@ -113,6 +176,19 @@ export function createInboundPipeline(deps: InboundPipelineDeps): InboundPipelin
       // Balasan tanpa pesan pemicu (mis. OTP) tidak punya baris untuk ditandai; log saja.
       logger.error({ err: error, messageLogId: data.message_log_id }, 'Balasan WhatsApp gagal terkirim permanen');
       if (data.message_log_id) await whatsappRepository.recordReplyFailure(data.message_log_id);
+    },
+
+    notificationStatus: {
+      markSent: async (notificationId) => {
+        await notificationsRepository.markSent(notificationId);
+      },
+
+      async markFailed(notificationId, reason) {
+        // `reason` adalah kode tertutup dari worker, bukan pesan galat gateway: log tidak boleh
+        // memuat nomor telepon atau isi pesan. Alasan tidak disimpan (tidak ada kolomnya).
+        logger.warn({ notificationId, reason }, 'Notifikasi WhatsApp gagal terkirim');
+        await notificationsRepository.markFailed(notificationId);
+      },
     },
   };
 }
