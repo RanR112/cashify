@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import type { BudgetsService } from '../budgets/budgets.service.js';
 import type { TransactionsService } from '../transactions/transactions.service.js';
 import type { TransactionsSummary } from '../transactions/transactions.summary.js';
 import type { UsersService } from '../users/users.service.js';
@@ -12,3 +13,4 @@ export type DashboardQuery = z.infer<typeof dashboardQuerySchema>;
 export type DashboardUsers = Pick<UsersService, 'getMe'>;
 export type DashboardTransactions = Pick<TransactionsService, 'list'>;
 export type DashboardSummary = Pick<TransactionsSummary, 'sumByType' | 'dailyCashflow'>;
+export type DashboardBudgets = Pick<BudgetsService, 'summary'>;

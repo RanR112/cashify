@@ -8,6 +8,7 @@ import { buildDemoDataset, DEMO_INITIAL_BALANCE } from '../../prisma/seed-demo-d
 import { dashboardResponseSchema } from '../../src/modules/dashboard/dashboard.schema.js';
 import { createDashboardService, RECENT_TRANSACTIONS_LIMIT } from '../../src/modules/dashboard/dashboard.service.js';
 import type {
+  DashboardBudgets,
   DashboardSummary,
   DashboardTransactions,
   DashboardUsers,
@@ -70,12 +71,24 @@ const fakeTransactions = (): DashboardTransactions & { list: ReturnType<typeof v
   list: vi.fn(async () => ({ data: [], next_cursor: null, has_more: false })),
 });
 
-function build(initialBalance: number, ledger: LedgerRow[], now = new Date('2026-09-15T05:00:00Z')) {
+const fakeBudgets = (
+  summary: Awaited<ReturnType<DashboardBudgets['summary']>> = null,
+): DashboardBudgets & { summary: ReturnType<typeof vi.fn> } => ({
+  summary: vi.fn(async () => summary),
+});
+
+function build(
+  initialBalance: number,
+  ledger: LedgerRow[],
+  now = new Date('2026-09-15T05:00:00Z'),
+  budgetSummary: Awaited<ReturnType<DashboardBudgets['summary']>> = null,
+) {
   const users = fakeUsers(initialBalance);
   const transactions = fakeTransactions();
   const summary = fakeSummary(ledger);
-  const service = createDashboardService({ users, transactions, summary, now: () => now });
-  return { service, users, transactions, summary };
+  const budgets = fakeBudgets(budgetSummary);
+  const service = createDashboardService({ users, transactions, summary, budgets, now: () => now });
+  return { service, users, transactions, summary, budgets };
 }
 
 describe('saldo', () => {
@@ -89,6 +102,7 @@ describe('saldo', () => {
       month: { income: 0, expense: 0, net: 0 },
       cashflow: [],
       recent_transactions: [],
+      budget_summary: null,
     });
   });
 
@@ -190,12 +204,18 @@ describe('periode (Asia/Jakarta)', () => {
 });
 
 describe('kontrak dan identitas', () => {
-  it('hasil lolos skema respons dan tidak memuat budget_summary', async () => {
+  it('hasil lolos skema respons dan memuat budget_summary', async () => {
     const { service } = build(2_000_000, [{ date: '2026-09-02', type: 'expense', amount: 25_000 }]);
     const body = await service.get(USER_ID, EMAIL, { month: '2026-09' });
 
     dashboardResponseSchema.parse(body);
-    expect(Object.keys(body).sort()).toEqual(['balance', 'cashflow', 'month', 'recent_transactions']);
+    expect(Object.keys(body).sort()).toEqual([
+      'balance',
+      'budget_summary',
+      'cashflow',
+      'month',
+      'recent_transactions',
+    ]);
   });
 
   it('meminta transaksi terbaru sebanyak batasnya dan meneruskan datanya apa adanya', async () => {
@@ -223,6 +243,38 @@ describe('kontrak dan identitas', () => {
     const { service, users } = build(0, []);
     users.getMe.mockRejectedValueOnce(new Error('Profil tidak ditemukan'));
     await expect(service.get(USER_ID, EMAIL, {})).rejects.toThrow('Profil tidak ditemukan');
+  });
+});
+
+describe('budget_summary', () => {
+  const BUDGET_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+
+  it('null bila tidak ada anggaran aktif, dan service budgets tetap dipanggil', async () => {
+    const { service, budgets } = build(0, []);
+
+    const body = await service.get(USER_ID, EMAIL, {});
+
+    expect(body.budget_summary).toBeNull();
+    expect(budgets.summary).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it('meneruskan ringkasan anggaran aktif apa adanya', async () => {
+    const summary = {
+      budget_id: BUDGET_ID,
+      name: 'Anggaran September',
+      period_start: '2026-09-01',
+      period_end: '2026-09-30',
+      total: 3_000_000,
+      used: 2_650_000,
+      remaining: 350_000,
+      percent: 88.3,
+      status: 'warning' as const,
+    };
+    const { service } = build(0, [], undefined, summary);
+
+    const body = await service.get(USER_ID, EMAIL, { month: '2026-09' });
+
+    expect(body.budget_summary).toEqual(summary);
   });
 });
 

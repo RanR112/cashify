@@ -175,8 +175,8 @@ describe.skipIf(!testDbUrl)('modul dashboard (integrasi, Postgres test)', () => 
         month: { income: 0, expense: 0, net: 0 },
         cashflow: [],
         recent_transactions: [],
+        budget_summary: null,
       });
-      expect(Object.keys(body)).not.toContain('budget_summary');
     });
 
     it('hanya saldo awal: balance = initial_balance', async () => {

@@ -9,6 +9,12 @@ import { rateLimit } from './middleware/rateLimiter.js';
 import { createAuthRepository } from './modules/auth/auth.repository.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import { createAuthService, type AuthService } from './modules/auth/auth.service.js';
+import { createAuditLogsRepository } from './modules/audit-logs/audit-logs.repository.js';
+import { createAuditLogsRouter } from './modules/audit-logs/audit-logs.routes.js';
+import { createAuditLogsService } from './modules/audit-logs/audit-logs.service.js';
+import { createBudgetsRepository } from './modules/budgets/budgets.repository.js';
+import { createBudgetsRouter } from './modules/budgets/budgets.routes.js';
+import { createBudgetsService } from './modules/budgets/budgets.service.js';
 import { createAccountsRepository } from './modules/accounts/accounts.repository.js';
 import { createAccountsRouter } from './modules/accounts/accounts.routes.js';
 import { createAccountsService } from './modules/accounts/accounts.service.js';
@@ -17,6 +23,11 @@ import { createCategoriesRouter } from './modules/categories/categories.routes.j
 import { createCategoriesService } from './modules/categories/categories.service.js';
 import { createDashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { createDashboardService } from './modules/dashboard/dashboard.service.js';
+import { createNotificationsRepository } from './modules/notifications/notifications.repository.js';
+import { createNotificationsRouter } from './modules/notifications/notifications.routes.js';
+import { createNotificationsService } from './modules/notifications/notifications.service.js';
+import { createReportsRouter } from './modules/reports/reports.routes.js';
+import { createReportsService } from './modules/reports/reports.service.js';
 import { createTransactionsRepository } from './modules/transactions/transactions.repository.js';
 import { createTransactionsRouter } from './modules/transactions/transactions.routes.js';
 import { createTransactionsService } from './modules/transactions/transactions.service.js';
@@ -79,7 +90,7 @@ async function readWebhookSecretFromEnv(): Promise<string> {
 }
 
 export interface AppDeps {
-  /** Klien Prisma untuk modul users, accounts, categories, transactions, dashboard, webhooks; bawaannya klien tunggal dari lib/database. */
+  /** Klien Prisma untuk modul users, accounts, categories, transactions, budgets, dashboard, webhooks, audit-logs; bawaannya klien tunggal dari lib/database. */
   prisma?: PrismaClient;
   /** Rahasia webhook (segmen path); bawaannya WEBHOOK_SECRET dari env. */
   webhookSecret?: string;
@@ -132,6 +143,13 @@ export function createApp(deps: AppDeps = {}) {
 
   const usersService = createUsersService(createUsersRepository(prisma));
   const transactionsService = createTransactionsService(createTransactionsRepository(prisma));
+  const transactionsSummary = createTransactionsSummary(prisma);
+  // Budgets membaca pengeluaran lewat port SpendingReader (implementasi di transactions.summary.ts),
+  // sehingga modul budgets tidak mengimpor transactions.
+  const budgetsService = createBudgetsService({
+    repository: createBudgetsRepository(prisma),
+    spending: transactionsSummary,
+  });
 
   app.use('/me', createUsersRouter(usersService, deps.verifyAuth));
   app.use('/accounts', createAccountsRouter(createAccountsService(createAccountsRepository(prisma)), deps.verifyAuth));
@@ -140,6 +158,14 @@ export function createApp(deps: AppDeps = {}) {
     createCategoriesRouter(createCategoriesService(createCategoriesRepository(prisma)), deps.verifyAuth),
   );
   app.use('/transactions', createTransactionsRouter(transactionsService, deps.verifyAuth));
+  app.use('/budgets', createBudgetsRouter(budgetsService, deps.verifyAuth));
+
+  const notificationsService = createNotificationsService(createNotificationsRepository(prisma));
+  app.use('/notifications', createNotificationsRouter(notificationsService, deps.verifyAuth));
+
+  // Modul baca saja: audit tetap ditulis di repository transactions dan budgets.
+  const auditLogsService = createAuditLogsService(createAuditLogsRepository(prisma));
+  app.use('/audit-logs', createAuditLogsRouter(auditLogsService, deps.verifyAuth));
 
   const whatsappRepository = createWhatsappRepository(prisma);
   app.use(
@@ -165,10 +191,17 @@ export function createApp(deps: AppDeps = {}) {
       createDashboardService({
         users: usersService,
         transactions: transactionsService,
-        summary: createTransactionsSummary(prisma),
+        summary: transactionsSummary,
+        budgets: budgetsService,
       }),
       deps.verifyAuth,
     ),
+  );
+
+  // Reports juga tanpa repository: port SummaryReader diimplementasikan transactions.summary.ts.
+  app.use(
+    '/reports',
+    createReportsRouter(createReportsService({ summary: transactionsSummary }), deps.verifyAuth),
   );
 
   // Route modul dipasang di atas garis ini. notFound dan errorHandler harus paling akhir.

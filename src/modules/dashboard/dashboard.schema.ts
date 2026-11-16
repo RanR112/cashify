@@ -1,9 +1,10 @@
 // Dashboard adalah satu-satunya modul yang boleh mengimpor modul lain (agregator).
-// Bentuk respons: claude/ARCHITECTURE.md Bagian 12, tanpa `budget_summary`
-// karena anggaran di luar cakupan (LOCAL-MODE.md). Menambah field nanti tidak merusak klien.
+// Bentuk respons: claude/ARCHITECTURE.md Bagian 12. `budget_summary` ditambahkan di
+// Phase 2 (claude/PHASE2-DECISIONS.md Q2/Q14); field lama tidak berubah.
 
 import { z } from '../../shared/openapi/zod.js';
 import { dateSchema, rupiahSchema } from '../../shared/schemas/common.schema.js';
+import { budgetSummarySchema } from '../budgets/budgets.schema.js';
 import { transactionSchema } from '../transactions/transactions.schema.js';
 
 export const monthSchema = z
@@ -33,5 +34,8 @@ export const dashboardResponseSchema = z
       .array(transactionSchema)
       .max(10)
       .openapi({ description: 'Hingga 10 transaksi terbaru, terlepas dari bulan yang dipilih.' }),
+    budget_summary: budgetSummarySchema.nullable().openapi({
+      description: 'Ringkasan anggaran aktif; null bila tidak ada anggaran yang periodenya memuat hari ini.',
+    }),
   })
   .openapi('Dashboard');

@@ -24,7 +24,16 @@ const EXPECTED_OPERATIONS = [
   'POST /auth/reset-password',
   'GET /me',
   'PATCH /me',
+  'POST /me/onboarding/complete',
   'GET /dashboard',
+  'GET /reports/monthly',
+  'GET /reports/trend',
+  'GET /budgets',
+  'POST /budgets',
+  'GET /budgets/current',
+  'GET /budgets/{id}',
+  'PATCH /budgets/{id}',
+  'DELETE /budgets/{id}',
   'GET /transactions',
   'POST /transactions',
   'GET /transactions/{id}',
@@ -39,6 +48,9 @@ const EXPECTED_OPERATIONS = [
   'POST /whatsapp/link/resend',
   'DELETE /whatsapp/link',
   'PATCH /whatsapp/preferences',
+  'GET /notifications',
+  'PATCH /notifications/{id}/read',
+  'GET /audit-logs',
   'POST /webhooks/openwa/{path}',
   'GET /health',
 ].sort();
@@ -68,7 +80,7 @@ function walk(node: unknown, path: string, visit: (path: string, node: Record<st
 }
 
 describe('dokumen OpenAPI', () => {
-  it('berisi tepat 25 operasi dari daftar cakupan, tidak lebih tidak kurang', () => {
+  it('berisi tepat 38 operasi: 25 kontrak API.md + /health + onboarding + 2 laporan + 6 anggaran + 2 notifikasi + 1 audit-logs Phase 2', () => {
     expect(operations()).toEqual(EXPECTED_OPERATIONS);
   });
 
@@ -78,7 +90,23 @@ describe('dokumen OpenAPI', () => {
   });
 
   it('semua kolom uang bertipe integer (aturan 1)', () => {
-    const moneyKeys = ['amount', 'initial_balance', 'balance', 'income', 'expense', 'net'];
+    const moneyKeys = [
+      'amount',
+      'initial_balance',
+      'balance',
+      'income',
+      'expense',
+      'net',
+      'total',
+      'income_total',
+      'expense_total',
+      'total_amount',
+      'spent',
+      'spent_total',
+      'remaining',
+      'remaining_total',
+      'used',
+    ];
     const found: string[] = [];
     walk(document, '$', (path, node) => {
       const properties = node.properties as Record<string, Record<string, unknown>> | undefined;

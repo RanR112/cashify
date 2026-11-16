@@ -1,0 +1,65 @@
+# Koleksi REST — Audit Log
+#
+# Salin session.access_token dari respons login (auth.http) ke @token.
+#
+# Modul ini hanya membaca. Baris audit dibuat otomatis saat transaksi atau anggaran
+# dibuat/diubah/dihapus lewat koleksi transactions.http dan budgets.http.
+# Tidak ada endpoint untuk menulis audit dari klien.
+#
+# Respons tidak memuat id, user_id, atau ip_address. `changes` hanya memuat kunci yang
+# masuk allowlist: transaksi (type, amount, date, description, category_id, account_id)
+# dan anggaran (name, total_amount, categories, auto_renew).
+#
+# Untuk mencoba paginasi: jalankan request "halaman pertama", salin next_cursor ke @cursor,
+# lalu jalankan request "halaman kedua".
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+@cursor = GANTI_DENGAN_NEXT_CURSOR_DARI_RESPONS_SEBELUMNYA
+
+### ============================================================
+### GET /audit-logs
+### ============================================================
+
+# Semua audit milik pengguna, terbaru dulu (created_at DESC, id DESC).
+GET {{baseUrl}}/audit-logs
+Authorization: Bearer {{token}}
+
+### Saring transaksi saja.
+GET {{baseUrl}}/audit-logs?entity_type=transaction
+Authorization: Bearer {{token}}
+
+### Saring anggaran saja, dengan halaman lebih kecil.
+GET {{baseUrl}}/audit-logs?entity_type=budget&limit=10
+Authorization: Bearer {{token}}
+
+### Saring satu entitas. Ganti nilainya dengan id transaksi/anggaran milik Anda.
+GET {{baseUrl}}/audit-logs?entity_id=11111111-1111-4111-8111-111111111111
+Authorization: Bearer {{token}}
+
+### Halaman pertama untuk mencoba cursor.
+GET {{baseUrl}}/audit-logs?limit=1
+Authorization: Bearer {{token}}
+
+### Halaman kedua: tempelkan next_cursor dari respons sebelumnya ke @cursor.
+GET {{baseUrl}}/audit-logs?limit=1&cursor={{cursor}}
+Authorization: Bearer {{token}}
+
+### ============================================================
+### Error
+### ============================================================
+
+### 400: entity_type di luar transaction/budget.
+GET {{baseUrl}}/audit-logs?entity_type=whatsapp_account
+Authorization: Bearer {{token}}
+
+### 400: entity_id bukan UUID.
+GET {{baseUrl}}/audit-logs?entity_id=bukan-uuid
+Authorization: Bearer {{token}}
+
+### 400: cursor rusak.
+GET {{baseUrl}}/audit-logs?cursor=abc
+Authorization: Bearer {{token}}
+
+### 401: tanpa token.
+GET {{baseUrl}}/audit-logs

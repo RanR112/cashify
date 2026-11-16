@@ -1,6 +1,7 @@
 import { currentMonthInJakarta, monthBounds } from '../../shared/utils/timezone.js';
 import type {
   DashboardBody,
+  DashboardBudgets,
   DashboardQuery,
   DashboardSummary,
   DashboardTransactions,
@@ -14,6 +15,7 @@ export interface DashboardServiceDeps {
   users: DashboardUsers;
   transactions: DashboardTransactions;
   summary: DashboardSummary;
+  budgets: DashboardBudgets;
   /** Bisa disuntik untuk test; menentukan bulan bawaan. */
   now?: () => Date;
 }
@@ -23,18 +25,19 @@ export interface DashboardServiceDeps {
  * database sendiri. Seluruh kueri baris lewat service/summary yang sudah memfilter pemilik
  * dan mengecualikan transaksi yang di-soft-delete.
  */
-export function createDashboardService({ users, transactions, summary, now = () => new Date() }: DashboardServiceDeps) {
+export function createDashboardService({ users, transactions, summary, budgets, now = () => new Date() }: DashboardServiceDeps) {
   return {
     async get(userId: string, email: string, query: DashboardQuery): Promise<DashboardBody> {
       const month = query.month ?? currentMonthInJakarta(now());
       const range = monthBounds(month);
 
-      const [profile, allTime, monthTotals, cashflow, recent] = await Promise.all([
+      const [profile, allTime, monthTotals, cashflow, recent, budgetSummary] = await Promise.all([
         users.getMe(userId, email),
         summary.sumByType(userId),
         summary.sumByType(userId, range),
         summary.dailyCashflow(userId, range),
         transactions.list(userId, { limit: RECENT_TRANSACTIONS_LIMIT }),
+        budgets.summary(userId),
       ]);
 
       return {
@@ -48,6 +51,7 @@ export function createDashboardService({ users, transactions, summary, now = () 
         },
         cashflow,
         recent_transactions: recent.data,
+        budget_summary: budgetSummary,
       };
     },
   };
