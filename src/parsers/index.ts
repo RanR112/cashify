@@ -38,6 +38,34 @@ function rejection(original: string, reason: RejectReason): ParseResult {
   return { outcome: 'rejected', original, intent: 'CREATE_TRANSACTION', reason };
 }
 
+// Catatan transaksi dibentuk dari sisa pesan setelah nominal dan tanggal dibuang. Sisa itu masih
+// membawa kata perintah dan filler percakapan ("catat ... aja", "totalnya", "dong"). Yang
+// dibersihkan hanya bagian tepi supaya nama barang di tengah tidak pernah ikut terpotong.
+const QUOTE_MARKS = /["“”„‟`]/g;
+const LEADING_REQUEST =
+  /^(?:tolong\s+|mohon\s+)?(?:catat(?:in|kan|lah)?|tambah(?:in|kan)?|masuk(?:in|kan)|input(?:in)?)(?:\s+(?:pengeluaran|pemasukan|transaksi))?\b[\s:,-]*/i;
+const LEADING_FILLER = /^(?:dong|ya|nih|deh|sih|kok|abis|habis|baru)\b[\s:,-]*/i;
+const TRAILING_FILLER =
+  /(?:^|[\s,]+)(?:ya|aja|saja|dong|deh|nih|sih|kok|totalnya|total|harganya|harga|seharga|sebesar|adalah)\s*$/i;
+const EDGE_PUNCTUATION = /^[\s,;:.!?]+|[\s,;:.!?]+$/g;
+
+/** Membersihkan kata perintah/filler di tepi catatan; teks di tengah dibiarkan apa adanya. */
+function cleanDescription(text: string): string {
+  let result = text.replace(QUOTE_MARKS, ' ').replace(/\s+/g, ' ').trim();
+  let previous: string;
+  do {
+    previous = result;
+    result = result
+      .replace(LEADING_REQUEST, '')
+      .replace(LEADING_FILLER, '')
+      .replace(TRAILING_FILLER, '')
+      .replace(EDGE_PUNCTUATION, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  } while (result !== previous);
+  return result;
+}
+
 interface TransactionInput {
   original: string;
   /** Teks ternormalisasi; untuk command, hanya argumennya (setelah "/keluar"). */
@@ -71,8 +99,11 @@ function parseTransaction(input: TransactionInput, context: ParseContext): Parse
   }
 
   // Command: "<nominal> [kategori] [catatan]"; catatan adalah sisanya tanpa kata kategori.
-  // Bahasa alami: catatan adalah pesan tanpa nominal dan penanda tanggal.
-  const description = limitDescription(category && isCommand ? cut(remainder, category.start, category.end) : remainder);
+  // Bahasa alami: catatan adalah pesan tanpa nominal dan penanda tanggal, lalu dibersihkan dari
+  // kata perintah/filler di tepinya.
+  const description = limitDescription(
+    cleanDescription(category && isCommand ? cut(remainder, category.start, category.end) : remainder),
+  );
   const day = date.result.date;
   const assumptions: Assumption[] = found?.assumedThousands ? ['amount_in_thousands'] : [];
 

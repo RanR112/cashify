@@ -357,8 +357,21 @@ describe('parseMessage: deskripsi (teks tanpa nominal dan penanda tanggal)', () 
     ['25rb makan siang', 'makan siang'],
     ['senin kemarin makan siang 25rb', 'makan siang'],
     ['isi bensin 50k', 'isi bensin'],
+    // Transcript lapangan: kata perintah/filler di tepi tidak ikut menjadi catatan.
+    ['catatin pengeluaran dong, tadi abis beli nasi goreng', 'beli nasi goreng'],
+    ['nasi goreng + es teh ya, tadi totalnya 20k', 'nasi goreng + es teh'],
+    ['catat "nasi goreng + es teh" aja', 'nasi goreng + es teh'],
   ])('"%s" -> "%s"', async (raw, description) => {
     expect(await parser.parseMessage(raw)).toMatchObject({ description });
+  });
+
+  it('"nasi goreng + es teh ya, tadi totalnya 20k" tetap siap dengan nominal 20.000', async () => {
+    expect(await parser.parseMessage('nasi goreng + es teh ya, tadi totalnya 20k')).toMatchObject({
+      outcome: 'ready',
+      amount: 20_000,
+      categorySlug: 'food',
+      description: 'nasi goreng + es teh',
+    });
   });
 });
 
