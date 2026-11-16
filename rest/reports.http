@@ -1,0 +1,74 @@
+# Koleksi REST — Laporan
+#
+# Salin session.access_token dari respons login (auth.http) ke @token.
+# Untuk data yang terisi, login sebagai pengguna demo (README bagian "Data demo", lalu
+# `npm run seed`), atau pakai `npm run seed:reset` bila tanggalnya sudah menua.
+#
+# Respons bulanan:
+#  { month, income_total, expense_total, net,
+#    by_category: [{category_id, name, slug, type, total, percent}],
+#    daily: [{date, income, expense}] }
+#  - net = income_total - expense_total; bisa negatif.
+#  - by_category diurutkan total menurun; percent terhadap total tipe yang sama, satu desimal.
+#  - daily memuat SETIAP tanggal bulan itu; hari tanpa transaksi bernilai 0.
+#  - Bulan masa depan sah dan menghasilkan nol.
+#  - Transaksi dan kategori yang sudah di-soft-delete: transaksi tidak dihitung, kategori
+#    tetap tampil bila transaksi lama masih merujuknya.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+@tokenB = GANTI_DENGAN_ACCESS_TOKEN_PENGGUNA_KEDUA
+
+### ============================================================
+### GET /reports/monthly
+### ============================================================
+
+# Sukses: 200 MonthlyReport untuk bulan yang diminta.
+GET {{baseUrl}}/reports/monthly?month=2026-10
+Authorization: Bearer {{token}}
+
+### Sukses: tanpa month memakai bulan berjalan Asia/Jakarta.
+GET {{baseUrl}}/reports/monthly
+Authorization: Bearer {{token}}
+
+### Sukses: bulan masa depan, semua nilai 0 dan daily tetap lengkap.
+GET {{baseUrl}}/reports/monthly?month=2999-01
+Authorization: Bearer {{token}}
+
+### Error 400: bulan tidak sah
+GET {{baseUrl}}/reports/monthly?month=2026-13
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/reports/monthly?month=2026-10
+
+### Isolasi: token B tidak melihat data token A (angkanya milik B).
+GET {{baseUrl}}/reports/monthly?month=2026-10
+Authorization: Bearer {{tokenB}}
+
+### ============================================================
+### GET /reports/trend
+### ============================================================
+
+# Sukses: 200 TrendReport, urut menaik, termasuk bulan tanpa transaksi.
+GET {{baseUrl}}/reports/trend?months=6
+Authorization: Bearer {{token}}
+
+### Sukses: tanpa months, bawaan 6.
+GET {{baseUrl}}/reports/trend
+Authorization: Bearer {{token}}
+
+### Sukses: batas maksimal 12 bulan.
+GET {{baseUrl}}/reports/trend?months=12
+Authorization: Bearer {{token}}
+
+### Error 400: months di luar 1-12
+GET {{baseUrl}}/reports/trend?months=13
+Authorization: Bearer {{token}}
+
+### Error 400: months bukan bilangan bulat
+GET {{baseUrl}}/reports/trend?months=1.5
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/reports/trend?months=6

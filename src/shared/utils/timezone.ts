@@ -71,6 +71,38 @@ export function monthBounds(month: string): { from: string; to: string } {
   return { from: `${month}-01`, to: `${month}-${String(lastDay).padStart(2, '0')}` };
 }
 
+/**
+ * Tanggal Senin dan Minggu yang memuat `date`, keduanya inklusif.
+ * Dipakai anggaran mingguan: `period_start` dinormalkan ke Senin, `period_end` ke Minggu.
+ * `getUTCDay()` aman di sini karena `date` sudah tanggal kalender, bukan instan waktu.
+ */
+export function weekBounds(date: string): { from: string; to: string } {
+  assertDate(date);
+  const day = new Date(`${date}T00:00:00.000Z`).getUTCDay(); // 0 = Minggu
+  const from = addDays(date, -((day + 6) % 7));
+  return { from, to: addDays(from, 6) };
+}
+
+/**
+ * Daftar bulan `YYYY-MM` terakhir, urut menaik dan inklusif terhadap `endMonth`.
+ * `count` harus bilangan bulat positif. Dipakai laporan trend.
+ */
+export function lastMonths(endMonth: string, count: number): string[] {
+  const match = MONTH_PATTERN.exec(endMonth);
+  if (!match) throw new RangeError(`Bukan bulan YYYY-MM yang sah: ${endMonth}`);
+  if (!Number.isInteger(count) || count < 1) {
+    throw new RangeError(`Jumlah bulan harus bilangan bulat positif: ${count}`);
+  }
+
+  const [year, month] = [Number(match[1]), Number(match[2])];
+  return Array.from({ length: count }, (_, offset) => {
+    const index = month - 1 - (count - 1 - offset);
+    const shiftedYear = year + Math.floor(index / 12);
+    const shiftedMonth = ((index % 12) + 12) % 12;
+    return `${shiftedYear}-${String(shiftedMonth + 1).padStart(2, '0')}`;
+  });
+}
+
 /** Instan UTC saat hari `date` dimulai di Jakarta (00:00 WIB = 17:00 UTC hari sebelumnya). */
 export function jakartaDayStartUtc(date: string): Date {
   assertDate(date);

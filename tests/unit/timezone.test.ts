@@ -5,10 +5,12 @@ import {
   isValidDateString,
   jakartaDayStartUtc,
   jakartaHour,
+  lastMonths,
   monthBounds,
   oneYearBefore,
   toJakartaDate,
   todayInJakarta,
+  weekBounds,
 } from '../../src/shared/utils/timezone.js';
 
 describe('toJakartaDate / todayInJakarta', () => {
@@ -126,6 +128,53 @@ describe('monthBounds', () => {
 
   it.each(['2026-13', '2026-00', '2026-9', '202609', '2026-09-01', ''])('melempar untuk %j', (bad) => {
     expect(() => monthBounds(bad)).toThrow(RangeError);
+  });
+});
+
+describe('weekBounds', () => {
+  it.each([
+    ['2026-09-28', '2026-09-28', '2026-10-04'], // Senin
+    ['2026-09-30', '2026-09-28', '2026-10-04'], // Rabu
+    ['2026-10-04', '2026-09-28', '2026-10-04'], // Minggu
+    ['2026-10-05', '2026-10-05', '2026-10-11'], // Senin berikutnya
+    ['2027-01-01', '2026-12-28', '2027-01-03'], // lintas tahun
+  ])('%s -> Senin %s, Minggu %s', (date, from, to) => {
+    expect(weekBounds(date)).toEqual({ from, to });
+  });
+
+  it('melempar untuk tanggal yang tidak ada', () => {
+    expect(() => weekBounds('2026-02-30')).toThrow(RangeError);
+  });
+});
+
+describe('lastMonths', () => {
+  it('urut menaik dan inklusif terhadap bulan akhir', () => {
+    expect(lastMonths('2026-10', 3)).toEqual(['2026-08', '2026-09', '2026-10']);
+    expect(lastMonths('2026-10', 1)).toEqual(['2026-10']);
+    expect(lastMonths('2026-10', 12)).toEqual([
+      '2025-11',
+      '2025-12',
+      '2026-01',
+      '2026-02',
+      '2026-03',
+      '2026-04',
+      '2026-05',
+      '2026-06',
+      '2026-07',
+      '2026-08',
+      '2026-09',
+      '2026-10',
+    ]);
+  });
+
+  it('melewati batas tahun', () => {
+    expect(lastMonths('2026-01', 3)).toEqual(['2025-11', '2025-12', '2026-01']);
+  });
+
+  it('melempar untuk format bulan atau jumlah yang tidak sah', () => {
+    expect(() => lastMonths('2026-13', 3)).toThrow(RangeError);
+    expect(() => lastMonths('2026-10', 0)).toThrow(RangeError);
+    expect(() => lastMonths('2026-10', 2.5)).toThrow(RangeError);
   });
 });
 

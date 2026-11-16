@@ -83,6 +83,18 @@ Content-Type: application/json
 }
 
 ### ============================================================
+### POST /me/onboarding/complete
+### ============================================================
+
+# Sukses: 200 UserProfile dengan onboarding_completed_at terisi.
+# Idempoten: memanggil ulang mempertahankan timestamp pertama. Tanpa body.
+POST {{baseUrl}}/me/onboarding/complete
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+POST {{baseUrl}}/me/onboarding/complete
+
+### ============================================================
 ### Isolasi antar-pengguna (aturan 8)
 ### ============================================================
 
