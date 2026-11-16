@@ -6,26 +6,38 @@ import {
   type QueueFactoryOptions,
 } from './inbound.queue.js';
 import { createOutboundQueue, OUTBOUND_QUEUE, type OutboundJobData } from './outbound.queue.js';
+import {
+  createScheduledQueue,
+  SCHEDULED_QUEUE,
+  type ScheduledJobData,
+} from './scheduled.queue.js';
 
 export * from './inbound.queue.js';
 export * from './outbound.queue.js';
+export * from './scheduled.queue.js';
 
-export const QUEUE_NAMES = { inbound: INBOUND_QUEUE, outbound: OUTBOUND_QUEUE } as const;
+export const QUEUE_NAMES = {
+  inbound: INBOUND_QUEUE,
+  outbound: OUTBOUND_QUEUE,
+  scheduled: SCHEDULED_QUEUE,
+} as const;
 
 export interface Queues {
   inbound: Queue<InboundJobData>;
   outbound: Queue<OutboundJobData>;
+  scheduled: Queue<ScheduledJobData>;
 }
 
 export function createQueues(connection: ConnectionOptions, options: QueueFactoryOptions = {}): Queues {
   return {
     inbound: createInboundQueue(connection, options),
     outbound: createOutboundQueue(connection, options),
+    scheduled: createScheduledQueue(connection, options),
   };
 }
 
 export async function closeQueues(queues: Queues): Promise<void> {
-  await Promise.all([queues.inbound.close(), queues.outbound.close()]);
+  await Promise.all([queues.inbound.close(), queues.outbound.close(), queues.scheduled.close()]);
 }
 
 let shared: Promise<{ queues: Queues; connection: { quit(): Promise<unknown> } }> | undefined;

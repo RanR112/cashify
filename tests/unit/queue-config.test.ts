@@ -14,8 +14,15 @@ import {
   OUTBOUND_JOB_OPTIONS,
   outboundJobSchema,
   randomDelayMs,
+  registerScheduledJobs,
+  SCHEDULED_CONCURRENCY,
+  SCHEDULED_JOB_OPTIONS,
+  SCHEDULES,
+  scheduledJobSchema,
+  type ScheduledJobData,
 } from '../../src/queues/index.js';
 import { abortableSleep } from '../../src/workers/outbound.worker.js';
+import type { Queue } from 'bullmq';
 
 vi.mock('../../src/config/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 
@@ -45,6 +52,18 @@ describe('konfigurasi yang tidak boleh berubah', () => {
   it('kedua antrean mencoba ulang job yang gagal tiga kali', () => {
     expect(INBOUND_JOB_OPTIONS.attempts).toBe(3);
     expect(OUTBOUND_JOB_OPTIONS.attempts).toBe(3);
+  });
+
+  it('scheduled: concurrency 1, tiga percobaan, backoff eksponensial', () => {
+    expect(SCHEDULED_CONCURRENCY).toBe(1);
+    expect(SCHEDULED_JOB_OPTIONS.attempts).toBe(3);
+    expect(SCHEDULED_JOB_OPTIONS.backoff).toEqual({ type: 'exponential', delay: 1000 });
+  });
+
+  it('jadwal memakai zona Asia/Jakarta dan jam yang disetujui', () => {
+    expect(SCHEDULES.dailySummary).toEqual({ pattern: '0 20 * * *', tz: 'Asia/Jakarta' });
+    expect(SCHEDULES.budgetAlert).toEqual({ pattern: '*/15 * * * *', tz: 'Asia/Jakarta' });
+    expect(SCHEDULES.renewBudgets).toEqual({ pattern: '5 0 * * *', tz: 'Asia/Jakarta' });
   });
 });
 
@@ -129,5 +148,33 @@ describe('skema job', () => {
     expect(() => outboundJobSchema.parse({ wa_chat_id: '', text: 'halo' })).toThrow();
     expect(() => outboundJobSchema.parse({ wa_chat_id: 'x', text: '' })).toThrow();
     expect(() => outboundJobSchema.parse({ wa_chat_id: 'x', text: 'y', message_log_id: 'salah' })).toThrow();
+  });
+
+  it('scheduled tidak membawa data; field lain dibuang', () => {
+    expect(scheduledJobSchema.parse({})).toEqual({});
+    expect(scheduledJobSchema.parse({ user_id: USER_ID, rahasia: 'x' })).toEqual({});
+  });
+});
+
+describe('registerScheduledJobs', () => {
+  it('mendaftarkan tiga jadwal dengan id stabil', async () => {
+    const upsert = vi.fn(async () => ({}));
+    const queue = { upsertJobScheduler: upsert } as unknown as Queue<ScheduledJobData>;
+
+    await registerScheduledJobs(queue);
+
+    expect(upsert).toHaveBeenCalledTimes(3);
+    expect(upsert).toHaveBeenCalledWith('daily-summary', SCHEDULES.dailySummary, {
+      name: 'daily-summary',
+      data: {},
+    });
+    expect(upsert).toHaveBeenCalledWith('budget-alert', SCHEDULES.budgetAlert, {
+      name: 'budget-alert',
+      data: {},
+    });
+    expect(upsert).toHaveBeenCalledWith('renew-budgets', SCHEDULES.renewBudgets, {
+      name: 'renew-budgets',
+      data: {},
+    });
   });
 });
