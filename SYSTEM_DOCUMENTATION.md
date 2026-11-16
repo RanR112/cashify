@@ -7,8 +7,9 @@ Dokumentasi teknis backend Cashify (nama kode di dokumen rancangan: MyFinance), 
 | Tanggal audit | 6 Oktober 2026 |
 | Basis audit | Branch `main`, commit terakhir `44204ea`, **ditambah perubahan yang belum di-commit** di working tree (modul `webhooks`, `whatsapp`, `parsers/`, `queues/`, `workers/`, `gateways/`, dan lainnya; lihat `git status`) |
 | Sumber kebenaran | Source code di `src/`, `prisma/schema.prisma`, dan `prisma/migrations/`. Dokumen di `claude/` dipakai hanya sebagai pembanding (Bagian 12) |
-| Status verifikasi | `npm run typecheck` lulus. `npm run test`: 34 berkas lulus, 11 berkas dilewati; 1.316 test lulus, 375 dilewati karena Redis dan Postgres test tidak menyala saat audit |
+| Status verifikasi | `npm run typecheck` lulus. `npm test`: 62 berkas lulus; 2.039 test lulus, 0 gagal, 0 dilewati dengan Redis dan Postgres test menyala |
 | Pembaruan | 19 Oktober 2026: ditambahkan endpoint `POST /me/onboarding/complete` (modul `users`), disusun dari berkas modul yang diberikan pemilik repo. Belum dijalankan `typecheck`, `test`, dan `npm run openapi` setelah perubahan ini |
+| Pembaruan | 14 November 2026: Tahap 6 — seed demo menambah anggaran bulan berjalan + riwayat notifikasi, audit keamanan/isolisasi data, sinkronisasi dokumen (LLM dua mode: klasifikasi + jawaban bebas opt-in, alur worker scheduled, jumlah test), dan koleksi Postman Phase 2 |
 
 **Label status yang dipakai di seluruh dokumen:**
 
@@ -81,10 +82,10 @@ Keduanya berbagi PostgreSQL (Supabase) dan Redis (antrean BullMQ, state percakap
 
 | Komponen | Lokasi | Peran |
 | --- | --- | --- |
-| Modul REST | `src/modules/*` | auth, users, accounts, categories, transactions, dashboard, whatsapp, webhooks |
+| Modul REST | `src/modules/*` | auth, users, accounts, categories, transactions, dashboard, reports, whatsapp, webhooks |
 | Parser | `src/parsers/` | Pipeline enam tahap, fungsi murni |
 | Percakapan WhatsApp | `src/modules/whatsapp/whatsapp.conversation.ts` | Mesin state konfirmasi/klarifikasi |
-| Antrean | `src/queues/` | `inbound` dan `outbound` (BullMQ) |
+| Antrean | `src/queues/` | `inbound`, `outbound`, dan `scheduled` (BullMQ) |
 | Worker | `src/workers/` | Konsumen antrean dan perakit pipeline |
 | Gateway | `src/gateways/` | `WhatsAppGateway` (OpenWA, mock) dan `LlmGateway` (disabled, mock) |
 | Shared | `src/shared/`, `src/lib/` | Error, skema bersama, utilitas zona waktu/uang/telepon, Auth, Prisma, lock, pending state |
@@ -147,7 +148,7 @@ WhatsApp ──► OpenWA ──webhook──► Express (simpan mentah, 204) �
 | Redis 7 | `docker compose up -d redis` (lokal) | BullMQ, state percakapan, lock pengguna, batas ajakan daftar |
 | OpenWA 4.76.0 | Proses lokal di folder `spike/` dengan tambalan user agent | Sesi bot WhatsApp tunggal; mengirim webhook dan menerima perintah kirim |
 | PostgreSQL 16 (test) | `docker compose up -d postgres-test`, port 54329, tmpfs | Hanya test integrasi, dengan stub skema `auth` |
-| LLM | **Tidak ada.** `LLM_PROVIDER` hanya menerima `disabled` | — |
+| LLM | **Groq (qwen/qwen3.8-27b)** via worker; `LLM_PROVIDER=groq`, `LLM_REPLY_MODE=template` bawaan | Cadangan klasifikasi kategori/intent; jawaban bebas opt-in (`freeform`) untuk pesan non-deterministik (ARCHITECTURE.md Bagian 7 tahap 5) |
 
 ---
 
@@ -187,9 +188,10 @@ flowchart LR
 
 Catatan penting dari diagram:
 
-- **Tidak ada LLM** di jalur mana pun. `LlmGateway` ada di kode tetapi tidak dirakit (Bagian 13, C1).
+- **LLM tidak wajib** di jalur mana pun. `LlmGateway` dirakit di worker sebagai cadangan klasifikasi; default `DisabledLlmGateway`, panggilan jaringan hanya terjadi bila `LLM_PROVIDER=groq` (C1 resolved). Dengan `LLM_REPLY_MODE=freeform` (opt-in) gateway juga menjawab pesan non-deterministik; lihat 10.5.
 - **Supabase Realtime** sudah disiapkan di database (publication untuk `transactions`), tetapi tidak ada klien yang berlangganan.
 - **Proses API memanggil OpenWA hanya untuk memeriksa status sesi** (sebelum menerbitkan OTP). Semua pengiriman pesan dilakukan worker.
+- **Worker menjalankan tiga antrean:** `inbound`, `outbound`, dan `scheduled`. Antrean `scheduled` berisi job berkala dari BullMQ job scheduler (ringkasan harian 20.00 WIB, peringatan anggaran tiap 15 menit, perpanjangan anggaran 00.05 WIB); hasilnya selalu masuk ke `outbound`, tidak memanggil OpenWA langsung.
 
 ### 3.2 Lapisan dan arah impor
 
@@ -216,6 +218,7 @@ Pengecualian yang disengaja:
 
 - **`webhooks/` tidak punya service.** Controller memanggil repository yang disuntikkan lewat `deps`, agar fase sinkron tetap di bawah 100 ms (aturan proyek nomor 4).
 - **`dashboard/` tidak punya repository.** Ia agregator yang memanggil service `users`, service `transactions`, dan `transactions.summary.ts`.
+- **`reports/` tidak punya repository.** Service-nya memakai port `SummaryReader` dari `reports.types.ts`; implementasinya ada di `transactions.summary.ts` dan dirakit di `src/app.ts`. Ini menjaga aturan modul tidak saling mengimpor.
 - Modul tidak saling mengimpor, kecuali `dashboard/`. Penghubung antarmodul untuk alur WhatsApp ada di **composition root worker** (`src/workers/pipeline.ts`), yang menyambungkan modul `whatsapp` ke `transactions`, `categories`, dan `accounts` lewat interface `ConversationPorts`.
 
 ### 3.3 Composition root dan dependency injection
@@ -236,11 +239,11 @@ Konfigurasi lingkungan (`src/config/env.ts`) memanggil `process.exit(1)` bila va
 | --- | --- | --- |
 | Entry point | `src/server.ts` | `src/worker.ts` |
 | Perintah | `npm run dev` | `npm run dev:worker` |
-| Mendengarkan | `HOST:PORT` (bawaan `127.0.0.1:3000`) | Antrean BullMQ `inbound` dan `outbound` |
-| Menulis ke DB | Semua endpoint REST, baris `message_logs` mentah | Transaksi dari WhatsApp, status `message_logs`, `whatsapp_accounts.last_message_at` |
+| Mendengarkan | `HOST:PORT` (bawaan `127.0.0.1:3000`) | Antrean BullMQ `inbound`, `outbound`, dan `scheduled` |
+| Menulis ke DB | Semua endpoint REST, baris `message_logs` mentah | Transaksi dari WhatsApp, status `message_logs`, `whatsapp_accounts.last_message_at`, `notifications`/`budgets` dari job terjadwal |
 | Mengirim WhatsApp | Tidak pernah (hanya memasukkan OTP ke antrean) | Ya, lewat `WhatsAppGateway.sendText` |
 | Jumlah instance | Bebas | **Harus satu** (laju kirim `outbound` bersifat global) |
-| Shutdown | Default Node | SIGTERM/SIGINT: tutup worker, antrean, Redis; paksa keluar setelah 15 detik |
+| Shutdown | Default Node | SIGTERM/SIGINT: tutup worker (termasuk `scheduled`), antrean, Redis; paksa keluar setelah 15 detik |
 
 ---
 
@@ -253,11 +256,11 @@ backend/
 ├── logs/                        # .gitkeep saja; log ditulis ke stdout
 ├── prisma/
 │   ├── schema.prisma            # 13 model
-│   ├── migrations/              # 5 migrasi (1 hasil generate + 4 SQL manual)
+│   ├── migrations/              # 7 migrasi (1 hasil generate + 6 SQL manual)
 │   ├── seed.ts                  # entry seed: kategori sistem + pengguna demo
 │   ├── seed-data.ts             # data murni 12 kategori sistem
-│   ├── seed-demo.ts             # pengguna demo, dompet, ±170 transaksi
-│   ├── seed-demo-data.ts        # generator data demo (murni)
+│   ├── seed-demo.ts             # pengguna demo, dompet, ±170 transaksi, anggaran, notifikasi
+│   ├── seed-demo-data.ts        # generator data demo (murni): transaksi, anggaran, notifikasi
 │   └── seed-demo-redis.ts       # membersihkan pending/lock demo di Redis
 ├── rest/                        # koleksi REST Client (.http) dan Postman
 ├── scripts/export-openapi.ts    # menulis claude/openapi.json
@@ -273,15 +276,18 @@ backend/
 │   │   ├── auth/  users/  accounts/  categories/
 │   │   ├── transactions/        # + transactions.summary.ts (agregasi)
 │   │   ├── dashboard/           # agregator, tanpa repository
+│   │   ├── reports/             # laporan bulanan/trend, tanpa repository
+│   │   ├── budgets/             # CRUD anggaran + progres, port SpendingReader
+│   │   ├── notifications/       # riwayat + template pesan, port status outbound
 │   │   ├── whatsapp/            # + conversation, templates, otp, session
 │   │   ├── webhooks/            # tanpa service
-│   │   └── audit-logs/ budgets/ notifications/ reports/   # kosong (.gitkeep)
+│   │   └── audit-logs/          # pembaca audit_logs (baca saja)
 │   ├── parsers/                 # pipeline parser, fungsi murni
 │   ├── gateways/
 │   │   ├── whatsapp/            # interface, OpenWA, mock
 │   │   └── llm/                 # interface, disabled, mock
-│   ├── queues/                  # definisi antrean inbound, outbound
-│   ├── workers/                 # worker BullMQ, pemroses inbound, pipeline
+│   ├── queues/                  # definisi antrean inbound, outbound, scheduled
+│   ├── workers/                 # worker BullMQ, pemroses inbound, pipeline, perakit job terjadwal
 │   └── shared/
 │       ├── constants/           # errorCodes, limits
 │       ├── errors/AppError.ts
@@ -339,11 +345,14 @@ backend/
 | `users` | 7 | `GET/PATCH /me`, `POST /me/onboarding/complete` |
 | `accounts` | 7 | `GET /accounts` (hanya baca) |
 | `categories` | 7 | `GET /categories`, `mergeCategories` (salinan pengguna menang atas kategori sistem), `listWithKeywords` untuk kamus parser |
-| `transactions` | 8 | CRUD + restore, audit log, optimistic locking, cursor; `transactions.summary.ts` untuk agregasi dashboard; metode khusus WhatsApp (`createFromWhatsapp`, `findBySourceMessage`, `latestFromWhatsapp`, `topCategoryIds`) |
+| `transactions` | 8 | CRUD + restore, audit log, optimistic locking, cursor; `transactions.summary.ts` untuk agregasi dashboard dan laporan; metode khusus WhatsApp (`createFromWhatsapp`, `findBySourceMessage`, `latestFromWhatsapp`, `topCategoryIds`) |
 | `dashboard` | 6 | Agregator; tanpa repository |
+| `reports` | 6 | `GET /reports/monthly`, `GET /reports/trend`; tanpa repository, memakai port `SummaryReader` |
+| `budgets` | 7 | CRUD anggaran + `GET /budgets/current`; progres dihitung saat diminta lewat port `SpendingReader` (implementasi `transactions.summary.ts`) |
 | `whatsapp` | 11 | Penautan OTP (`service`, `otp`, `session`), percakapan bot (`conversation`), template balasan (`templates`), repository untuk akun, verifikasi, sesi, dan pesan masuk |
 | `webhooks` | 6 | Penerima webhook OpenWA; tanpa service |
-| `audit-logs`, `budgets`, `notifications`, `reports` | 0 | Folder kosong. Tabelnya ada, modulnya tidak |
+| `notifications` | 8 | `GET /notifications`, `PATCH /notifications/{id}/read`; template pesan (`templates`); port `NotificationStatusPort` untuk status kirim lewat worker outbound |
+| `audit-logs` | 8 | `GET /audit-logs` (baca saja); penyaring `changes` sebagai fungsi murni (`audit-logs.changes.ts`) |
 
 ### 4.5 `src/parsers/`
 
@@ -367,15 +376,19 @@ Fungsi murni tanpa Prisma, jaringan, atau jam sistem. Hanya mengimpor `shared/ut
 | `gateways/whatsapp/whatsapp.gateway.ts` | Interface `WhatsAppGateway { sendText(to, body): Promise<void>; getStatus(): Promise<{connected, detail?}> }` |
 | `gateways/whatsapp/openwa.gateway.ts` | Implementasi HTTP ke OpenWA Easy API v4 |
 | `gateways/whatsapp/mock.gateway.ts` | Gateway palsu untuk test |
-| `gateways/llm/*` | Kontrak `LlmClassificationSchema` (strict, tanpa `amount`/`date`), `safeClassify`, `DisabledLlmGateway`, mock. **Tidak dipakai** di luar folder ini |
+| `gateways/llm/*` | Kontrak `LlmClassificationSchema` (strict, tanpa `amount`/`date`), `safeClassify`, `safeChat` (jawaban bebas tersaring), `DisabledLlmGateway`, mock. Dipakai worker lewat `src/worker.ts` → `pipeline.ts` → port `ConversationLlm`; default `DisabledLlmGateway` dan `LLM_REPLY_MODE=template` |
 | `queues/inbound.queue.ts` | Antrean `inbound`, job `{ message_log_id }`, `jobId` = id pesan, concurrency 5 |
-| `queues/outbound.queue.ts` | Antrean `outbound`, job `{ wa_chat_id, text, message_log_id? }`, concurrency 1, jeda acak 2–5 detik |
+| `queues/outbound.queue.ts` | Antrean `outbound`, job `{ wa_chat_id, text, message_log_id?, notification_id? }`, concurrency 1, jeda acak 2–5 detik; opsi `delay` untuk jitter ringkasan harian |
+| `queues/scheduled.queue.ts` | Antrean `scheduled`, job tanpa data, tiga jadwal BullMQ (`daily-summary` 20.00, `budget-alert` tiap 15 menit, `renew-budgets` 00.05 WIB), attempts 3 + backoff eksponensial |
 | `queues/index.ts` | `getQueues()`: antrean bersama untuk produsen di proses API |
 | `workers/inbound.worker.ts` | Pembungkus BullMQ: validasi job, `onExhausted` saat percobaan terakhir gagal |
 | `workers/inbound.processor.ts` | Logika satu pesan masuk: identifikasi pengirim, lock, urutan pesan, media vs teks |
-| `workers/outbound.worker.ts` | Kirim, jeda acak, tunda saat sesi terputus, gugurkan job berumur > 1 jam |
-| `workers/pipeline.ts` | Composition root pemroses inbound |
-| `workers/index.ts` | `startWorkers()` dengan `ready()` dan `close()` |
+| `workers/outbound.worker.ts` | Kirim, jeda acak, tunda saat sesi terputus, gugurkan job berumur > 1 jam; menandai `notifications` `sent`/`failed` lewat port |
+| `workers/scheduled.worker.ts` | Pembungkus BullMQ untuk job berkala: validasi nama/data, concurrency 1, penyuntikan `now` |
+| `workers/scheduled.ports.ts` | Adapter composition root: pemindai `whatsapp_accounts`, pembaca ringkasan, klaim atomik `alert_sent_at` + insert notifikasi |
+| `workers/scheduled.ts` | Merakit service budgets/notifications/transactions menjadi tiga handler; semua enqueue lewat `outbound` |
+| `workers/pipeline.ts` | Composition root pemroses inbound + port `NotificationStatusPort` |
+| `workers/index.ts` | `startWorkers()` dengan `ready()` dan `close()` untuk ketiga worker |
 
 ### 4.7 `src/shared/`
 
@@ -528,6 +541,8 @@ Penanganan kegagalan:
 
 State tunggal per pengguna disimpan di Redis `pending:{user_id}` (TTL 15 menit). Pending baru menimpa yang lama tanpa pemberitahuan; tidak ada pesan pengingat saat kedaluwarsa.
 
+Saat pending `amount` atau `confirmation`, pesan yang diawali `catat`/`catatin`/`catatkan` dan **tidak** memuat nominal diperlakukan sebagai ralat catatan: hanya `draft.description` yang diganti, sedangkan tipe, tanggal, kategori, nominal, `sourceMessageId`, dan `assumedThousands` dipertahankan. Pending `amount` lalu bertanya nominal lagi; pending `confirmation` menampilkan ulang konfirmasi. Pesan dengan nominal tetap menjadi transaksi baru. Pending `category`/`delete` tidak memakai jalur ini.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Kosong
@@ -541,7 +556,9 @@ stateDiagram-v2
     amount --> confirmation: balas nominal, kategori sudah diketahui
     amount --> category: balas nominal, kategori belum diketahui
     amount --> amount: nominal tak terbaca / ambigu
+    amount --> amount: "catat ..." tanpa nominal (ralat catatan)
 
+    confirmation --> confirmation: "catat ..." tanpa nominal (ralat catatan)
     confirmation --> Kosong: "ya" → transaksi disimpan
     delete --> Kosong: "ya" → soft delete
     confirmation --> Kosong: "batal"
@@ -561,12 +578,12 @@ Perilaku per intent (dari `whatsapp.conversation.ts`):
 | `CLARIFY_RESPONSE` | `2`, `makanan`, `25 ribu` saat ditanya | Lengkapi pending |
 | `DELETE` | `hapus transaksi terakhir`, `/hapus` | Tawarkan transaksi `whatsapp` terbaru dalam 24 jam |
 | `HELP` | `bantuan`, `/help` | Panduan |
-| `QUERY` | `saldo`, `/saldo`, `berapa pengeluaran` | **Belum tersedia**: balasan "buka aplikasi" |
-| `CORRECT` | `ubah jadi 35 ribu` | **Belum tersedia**: balasan "ubah di aplikasi" |
-| `UNKNOWN` | lainnya | Panduan singkat, atau mengingatkan pertanyaan yang sedang menunggu |
+| `QUERY` | `saldo`, `/saldo`, `berapa pengeluaran` | **Belum tersedia**: balasan "buka aplikasi" (mode `freeform` menjawab lewat LLM) |
+| `CORRECT` | `ubah jadi 35 ribu` | **Belum tersedia**: balasan "ubah di aplikasi" (mode `freeform` menjawab lewat LLM) |
+| `UNKNOWN` | lainnya | Panduan singkat, mengingatkan pertanyaan yang sedang menunggu, atau jawaban LLM di mode `freeform` |
 | `IGNORED` | pesan kosong/hanya emoji | Tidak dibalas |
 
-Semua teks balasan berasal dari `whatsapp.templates.ts` (maks. 5 baris, maks. 1 emoji di awal), dijaga `tests/unit/whatsapp-templates.test.ts`.
+Semua teks balasan berasal dari `whatsapp.templates.ts` (maks. 5 baris, maks. 1 emoji di awal), dijaga `tests/unit/whatsapp-templates.test.ts`. Pengecualian opt-in: `LLM_REPLY_MODE=freeform` mengirim jawaban LLM untuk `UNKNOWN`/`QUERY`/`CORRECT` tanpa pending; jawaban itu tidak pernah diparse dan dibatasi `safeChat` (10.5).
 
 ### 5.6 Pipeline parser
 
@@ -618,6 +635,8 @@ Aturan tanggal (`date.ts`), acuan Asia/Jakarta dari `now` (waktu pesan menurut W
 
 Tipe transaksi: pemasukan bila ada kata utuh `gaji`, `bonus`, `thr`, `dapat`, `terima`, `masuk`, `untung`, `dibayar`, `fee`, `komisi`; selain itu pengeluaran. Kategori: kata kunci dan nama kategori dari database (kata utuh), kata kunci generik `beli` kalah dari kata kunci spesifik.
 
+Catatan transaksi adalah sisa pesan setelah nominal dan penanda tanggal dibuang. Kata perintah/filler di tepi sisa itu dibersihkan (`catat`, `catatin`, `pengeluaran`, `dong`, `abis`, `ya`, `aja`, `totalnya`, dan sejenisnya), tetapi kata barang/kategori di tengah tidak disentuh. Contoh: `catatin pengeluaran dong, tadi abis beli nasi goreng` → `beli nasi goreng`; `nasi goreng + es teh ya, tadi totalnya 20k` → `nasi goreng + es teh`; `catat "nasi goreng + es teh" aja` → `nasi goreng + es teh`.
+
 ### 5.7 Penautan WhatsApp lewat OTP
 
 ```mermaid
@@ -659,8 +678,26 @@ Worker `outbound` (`concurrency: 1`, konstanta, tidak dapat diubah dari opsi):
 2. Job lebih tua dari 1 jam → `UnrecoverableError` (balasan basi tidak dikirim).
 3. `gateway.getStatus()`; terputus → `moveToDelayed(+30 detik)` + `DelayedError` (tidak memakai jatah percobaan).
 4. `gateway.sendText(wa_chat_id, text)`.
-5. **Selalu** jeda acak 2.000–5.000 ms setelah langkah 4, berhasil maupun gagal. Jeda dibatalkan saat worker ditutup.
-6. Gagal kirim: 3 percobaan, backoff eksponensial 5 detik; percobaan terakhir mencatat `message_logs.error = 'reply_failed'` bila job punya `message_log_id` (OTP tidak punya, hanya dicatat di log).
+5. Bila job punya `notification_id`: status notifikasi menjadi `sent` dan `sent_at` diisi. Gagal menulis status hanya dicatat di log, tidak menggagalkan job (pesan sudah terkirim; melempar akan mengirim ulang).
+6. **Selalu** jeda acak 2.000–5.000 ms setelah langkah 4, berhasil maupun gagal. Jeda dibatalkan saat worker ditutup.
+7. Gagal kirim: 3 percobaan, backoff eksponensial 5 detik; percobaan terakhir mencatat `message_logs.error = 'reply_failed'` bila job punya `message_log_id` (OTP tidak punya, hanya dicatat di log). Bila punya `notification_id`, status notifikasi menjadi `failed` (hanya dari `pending`) dengan alasan `send_failed`, `expired`, atau `invalid_job` di log; alasannya tidak disimpan.
+
+### 5.9 Job terjadwal (antrean `scheduled`)
+
+Worker `scheduled` memakai BullMQ **job scheduler** (`upsertJobScheduler`), bukan cron sistem, sehingga jadwal tetap ada saat worker restart. Semua pola cron memakai zona `Asia/Jakarta`; worker menyuntikkan satu `now` ke handler, dan logika bisnis tidak pernah memanggil `Date.now()` sendiri. Concurrency 1, attempts 3, backoff eksponensial 1 detik.
+
+| Job | Jadwal | Yang dilakukan | Idempotensi |
+| --- | --- | --- | --- |
+| `daily-summary` | `0 20 * * *` (20.00 WIB) | Memindai `whatsapp_accounts` yang `verified` dan `daily_summary_enabled`, pengguna belum soft-delete; memakai `transactions.summary.dailySummary` untuk satu tanggal WIB; melewati pengguna tanpa transaksi; membuat baris `notifications` `daily_summary` lalu memasukkan ke `outbound` dengan `jobId daily:{user_id}:{YYYY-MM-DD}` dan jitter 0–30 menit | Cek baris `(user_id, payload.date)` sebelum insert + unique expression index `notifications_daily_summary_key`; jobId deterministik |
+| `budget-alert` | `*/15 * * * *` (tiap 15 menit) | Hanya 07.00–22.00 WIB. Memindai akun `verified` + `budget_alert_enabled`, mengambil anggaran aktif, menghitung pengeluaran per kategori, lalu mengirim bila `spent * 100 >= amount * alert_threshold` dan `alert_sent_at IS NULL` | Satu transaksi: `UPDATE budget_categories SET alert_sent_at = now WHERE ... AND alert_sent_at IS NULL`; hanya `count = 1` yang membuat notifikasi; `jobId alert:{budget_categories.id}:{period_start}` |
+| `renew-budgets` | `5 0 * * *` (00.05 WIB) | Memindai anggaran `auto_renew` yang `period_end < hari ini WIB` dan belum punya anggaran periode berjalan; hanya membuat periode yang memuat hari ini (periode terlewat tidak diisi); menyalin nama, tipe, total, `auto_renew`, `rollover_enabled`, dan alokasi kategori yang masih terlihat; menulis audit `actor_type = 'system'` | Partial unique `(user_id, period_type, period_start) WHERE deleted_at IS NULL`; pelanggaran unique diperlakukan sebagai "sudah ada" |
+
+Batas dan kegagalan:
+
+- Maksimal **3 pesan otomatis per pengguna per hari WIB** (`daily_summary` + `budget_alert`, status `pending`/`sent`/`read`). Baris `failed` tidak dihitung karena tidak akan tiba; `pending` dihitung agar kuota tidak terlampaui saat menunggu antrean.
+- Enqueue gagal pada `daily-summary`: baris notifikasi ditandai `failed` (tidak diulang untuk tanggal yang sama karena unique index).
+- Enqueue gagal pada `budget-alert`: notifikasi `failed` **dan** `alert_sent_at` dikembalikan ke `NULL`, sehingga pemindaian berikutnya boleh mencoba lagi.
+- Tidak ada panggilan WhatsApp langsung dari job. Semua pesan masuk ke `outbound` agar concurrency 1 dan jeda 2–5 detik tetap berlaku.
 
 ---
 
@@ -766,23 +803,34 @@ Base URL lokal: `http://localhost:3000` (bawaan `HOST=127.0.0.1`, `PORT=3000`). 
 | 12 | PATCH | `/me` | Ubah profil | JWT | — | global |
 | 13 | POST | `/me/onboarding/complete` | Tandai onboarding selesai | JWT | — | global |
 | 14 | GET | `/dashboard` | Ringkasan beranda | JWT | — | global |
-| 15 | GET | `/transactions` | Daftar transaksi | JWT | — | global |
-| 16 | POST | `/transactions` | Buat transaksi | JWT | — | 60/menit/pengguna |
-| 17 | GET | `/transactions/{id}` | Detail transaksi | JWT | — | global |
-| 18 | PATCH | `/transactions/{id}` | Ubah sebagian | JWT | — | global |
-| 19 | DELETE | `/transactions/{id}` | Soft delete | JWT | — | global |
-| 20 | POST | `/transactions/{id}/restore` | Pulihkan | JWT | — | global |
-| 21 | GET | `/categories` | Daftar kategori | JWT | — | global |
-| 22 | GET | `/accounts` | Daftar dompet | JWT | — | global |
-| 23 | GET | `/whatsapp/status` | Status tautan | JWT | — | global |
-| 24 | POST | `/whatsapp/link/request` | Kirim OTP | JWT | — | global + kuota harian di service |
-| 25 | POST | `/whatsapp/link/verify` | Verifikasi OTP | JWT | — | global + 5 percobaan per kode |
-| 26 | POST | `/whatsapp/link/resend` | Kirim ulang OTP | JWT | — | global + jeda 60 detik + kuota harian |
-| 27 | DELETE | `/whatsapp/link` | Putuskan tautan | JWT | — | global |
-| 28 | PATCH | `/whatsapp/preferences` | Sakelar notifikasi | JWT | — | global |
-| 29 | POST | `/webhooks/openwa/{path}` | Penerima event OpenWA | Rahasia di path | — | 300/menit/IP (tanpa global) |
+| 15 | GET | `/reports/monthly` | Laporan bulanan | JWT | — | global |
+| 16 | GET | `/reports/trend` | Tren beberapa bulan | JWT | — | global |
+| 17 | GET | `/budgets` | Daftar anggaran | JWT | — | global |
+| 18 | POST | `/budgets` | Buat anggaran | JWT | — | global |
+| 19 | GET | `/budgets/current` | Anggaran aktif + progres | JWT | — | global |
+| 20 | GET | `/budgets/{id}` | Detail anggaran + progres | JWT | — | global |
+| 21 | PATCH | `/budgets/{id}` | Ubah sebagian | JWT | — | global |
+| 22 | DELETE | `/budgets/{id}` | Soft delete | JWT | — | global |
+| 23 | GET | `/transactions` | Daftar transaksi | JWT | — | global |
+| 24 | POST | `/transactions` | Buat transaksi | JWT | — | 60/menit/pengguna |
+| 25 | GET | `/transactions/{id}` | Detail transaksi | JWT | — | global |
+| 26 | PATCH | `/transactions/{id}` | Ubah sebagian | JWT | — | global |
+| 27 | DELETE | `/transactions/{id}` | Soft delete | JWT | — | global |
+| 28 | POST | `/transactions/{id}/restore` | Pulihkan | JWT | — | global |
+| 29 | GET | `/categories` | Daftar kategori | JWT | — | global |
+| 30 | GET | `/accounts` | Daftar dompet | JWT | — | global |
+| 31 | GET | `/whatsapp/status` | Status tautan | JWT | — | global |
+| 32 | POST | `/whatsapp/link/request` | Kirim OTP | JWT | — | global + kuota harian di service |
+| 33 | POST | `/whatsapp/link/verify` | Verifikasi OTP | JWT | — | global + 5 percobaan per kode |
+| 34 | POST | `/whatsapp/link/resend` | Kirim ulang OTP | JWT | — | global + jeda 60 detik + kuota harian |
+| 35 | DELETE | `/whatsapp/link` | Putuskan tautan | JWT | — | global |
+| 36 | PATCH | `/whatsapp/preferences` | Sakelar notifikasi | JWT | — | global |
+| 37 | GET | `/notifications` | Riwayat notifikasi | JWT | — | global |
+| 38 | PATCH | `/notifications/{id}/read` | Tandai sudah dibaca | JWT | — | global |
+| 39 | GET | `/audit-logs` | Riwayat audit milik pemanggil | JWT | — | global |
+| 40 | POST | `/webhooks/openwa/{path}` | Penerima event OpenWA | Rahasia di path | — | 300/menit/IP (tanpa global) |
 
-Kolom **Role** kosong karena sistem tidak punya role (Bagian 6.5). Endpoint #2 dan #3 tidak tercantum di `claude/API.md`, tetapi terpasang di `src/config/swagger.ts`. Endpoint #13 juga tidak tercantum di `claude/API.md`; ia ditambahkan belakangan di modul `users` (Bagian 12.3).
+Kolom **Role** kosong karena sistem tidak punya role (Bagian 6.5). Endpoint #2 dan #3 tidak tercantum di `claude/API.md`, tetapi terpasang di `src/config/swagger.ts`. Endpoint #13 juga tidak tercantum di `claude/API.md`; ia ditambahkan belakangan di modul `users` (Bagian 12.3). Endpoint #39 berasal dari Phase 2 (`claude/PHASE2-DECISIONS.md` Q11).
 
 ### 7.2 Konvensi umum
 
@@ -1319,6 +1367,373 @@ Authorization: Bearer eyJhbGciOi...
 
 ---
 
+#### `GET /reports/monthly`
+
+| | |
+| --- | --- |
+| Tujuan | Ringkasan satu bulan: total, rincian kategori, dan arus kas harian |
+| Auth | JWT |
+| Diproses oleh | `reports.service.monthly`: tiga kueri paralel lewat port `SummaryReader` |
+
+**Query**
+
+| Parameter | Tipe | Wajib | Validasi |
+| --- | --- | --- | --- |
+| `month` | string | Tidak | `YYYY-MM` dengan bulan 01–12 (pesan `"Format harus YYYY-MM"`). Bawaan: bulan berjalan Asia/Jakarta |
+
+**Contoh request**
+
+```http
+GET /reports/monthly?month=2026-10
+Authorization: Bearer eyJhbGciOi...
+```
+
+**Respons 200** — `MonthlyReport` (Bagian 8.11)
+
+```json
+{
+  "month": "2026-10",
+  "income_total": 5000000,
+  "expense_total": 2650000,
+  "net": 2350000,
+  "by_category": [
+    { "category_id": "9f3c2a1e-6b4d-4e8a-9c1f-0d5e7a8b3c21", "name": "Gaji", "slug": "salary", "type": "income", "total": 5000000, "percent": 100 },
+    { "category_id": "1d2e3f40-2222-4a5b-8c9d-000000000002", "name": "Makanan", "slug": "food", "type": "expense", "total": 1200000, "percent": 45.3 }
+  ],
+  "daily": [
+    { "date": "2026-10-01", "income": 5000000, "expense": 0 },
+    { "date": "2026-10-02", "income": 0, "expense": 125000 }
+  ]
+}
+```
+
+**Pemrosesan:**
+
+| Field | Sumber |
+| --- | --- |
+| `month` | Query, atau `currentMonthInJakarta()` bila kosong |
+| `income_total`, `expense_total` | `SummaryReader.sumByType` dengan `date` dalam `monthBounds(month)` |
+| `by_category` | `SummaryReader.categoryTotals`: agregasi `transactions` JOIN `categories`, filter `user_id` dan `transactions.deleted_at IS NULL`; urut `total` menurun, tie-break nama menaik |
+| `by_category[].percent` | `total / total tipe yang sama × 100`, satu desimal; pembagi nol → `0` |
+| `daily` | `SummaryReader.dailyCashflow` ditambah pengisian setiap tanggal `monthBounds` yang tidak punya transaksi dengan `{ income: 0, expense: 0 }`; urut tanggal menaik |
+| Kategori soft-deleted | Tetap tampil bila transaksi lama merujuknya; `categories.deleted_at` tidak difilter |
+| Bulan masa depan | Sah; seluruh nilai `0`, `daily` tetap lengkap |
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | `"Format harus YYYY-MM"` |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+
+---
+
+#### `GET /reports/trend`
+
+| | |
+| --- | --- |
+| Tujuan | Pemasukan, pengeluaran, dan selisih selama N bulan terakhir |
+| Auth | JWT |
+| Diproses oleh | `reports.service.trend`: `lastMonths` + satu `sumByType` per bulan (paralel) |
+
+**Query**
+
+| Parameter | Tipe | Wajib | Validasi |
+| --- | --- | --- | --- |
+| `months` | integer | Tidak | Bilangan bulat 1–12. Bawaan: 6 |
+
+**Contoh request**
+
+```http
+GET /reports/trend?months=6
+Authorization: Bearer eyJhbGciOi...
+```
+
+**Respons 200** — `TrendReport` (Bagian 8.12)
+
+```json
+{
+  "months": [
+    { "month": "2026-08", "income": 7000000, "expense": 4200000, "net": 2800000 },
+    { "month": "2026-09", "income": 0, "expense": 0, "net": 0 },
+    { "month": "2026-10", "income": 5000000, "expense": 2650000, "net": 2350000 }
+  ]
+}
+```
+
+**Pemrosesan:**
+
+| Field | Sumber |
+| --- | --- |
+| Daftar bulan | `lastMonths(currentMonthInJakarta(), months)`, urut menaik dan inklusif bulan berjalan |
+| `income`, `expense`, `net` | `SummaryReader.sumByType` per `monthBounds(month)`; `net = income − expense` |
+| Bulan tanpa transaksi | Tetap ada dengan nilai `0` |
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | `months` bukan bilangan bulat 1–12 |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+
+---
+
+#### `GET /budgets`
+
+| | |
+| --- | --- |
+| Tujuan | Daftar anggaran milik pemanggil |
+| Auth | JWT |
+| Diproses oleh | `budgets.service.list` → `budgets.repository.list` |
+| Urutan | `period_start DESC, id DESC` |
+
+**Query**
+
+| Parameter | Tipe | Wajib | Validasi |
+| --- | --- | --- | --- |
+| `status` | enum | Tidak | `active` atau `all`. Bawaan `all` agar riwayat tidak hilang |
+
+**Contoh request**
+
+```http
+GET /budgets?status=active
+Authorization: Bearer eyJhbGciOi...
+```
+
+**Respons 200** — `BudgetList` (Bagian 8.13). Tanpa progres dan tanpa cursor.
+
+```json
+{
+  "data": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "Anggaran November",
+      "period_type": "monthly",
+      "period_start": "2026-11-01",
+      "period_end": "2026-11-30",
+      "total_amount": 3000000,
+      "auto_renew": true,
+      "rollover_enabled": false,
+      "categories": [
+        {
+          "category_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          "name": "Makanan",
+          "slug": "food",
+          "amount": 2000000,
+          "alert_threshold": 80
+        }
+      ],
+      "created_at": "2026-11-01T03:12:35.000Z"
+    }
+  ]
+}
+```
+
+**Pemrosesan:**
+
+| Field | Sumber |
+| --- | --- |
+| Filter pemilik | `user_id = JWT` dan `deleted_at IS NULL` |
+| `status=active` | `period_start <= hari ini <= period_end`, hari ini dihitung `todayInJakarta()` |
+| `status=all` | Seluruh anggaran aktif (tidak terhapus), termasuk periode lampau |
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | `status` bukan `active`/`all` |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+
+---
+
+#### `POST /budgets`
+
+| | |
+| --- | --- |
+| Tujuan | Membuat anggaran beserta alokasi kategori |
+| Auth | JWT |
+| Diproses oleh | `budgets.service.create` → `budgets.repository.create` |
+
+**Body**
+
+| Field | Tipe | Wajib | Validasi |
+| --- | --- | --- | --- |
+| `name` | string | Tidak | 1–100 karakter setelah `trim` |
+| `period_type` | enum | Ya | `monthly` atau `weekly` |
+| `period_start` | date | Ya | `YYYY-MM-DD`; dinormalkan server ke awal periode |
+| `total_amount` | integer | Ya | Rupiah penuh > 0 dan ≤ 2.147.483.647 |
+| `auto_renew` | boolean | Tidak | Bawaan `true`; job `renew-budgets` (00.05 WIB) membuat periode berikutnya setelah `period_end` lewat |
+| `rollover_enabled` | boolean | Tidak | Bawaan `false`; disimpan tanpa efek |
+| `categories` | array | Ya | Minimal 1; `category_id` UUID, `amount` > 0, `alert_threshold` 1–100 (bawaan 80); tidak boleh ganda; jumlah `amount` ≤ `total_amount` |
+
+**Contoh request**
+
+```http
+POST /budgets
+Authorization: Bearer eyJhbGciOi...
+Content-Type: application/json
+
+{
+  "name": "Anggaran November",
+  "period_type": "monthly",
+  "period_start": "2026-11-15",
+  "total_amount": 3000000,
+  "categories": [
+    { "category_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "amount": 2000000 },
+    { "category_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "amount": 1000000, "alert_threshold": 90 }
+  ]
+}
+```
+
+**Respons 201** — `Budget` (Bagian 8.13). `period_start` menjadi `2026-11-01` dan `period_end` menjadi `2026-11-30`.
+
+**Pemrosesan:**
+
+| Langkah | Aturan |
+| --- | --- |
+| Normalisasi periode | `monthly`: `monthBounds(YYYY-MM)`; `weekly`: `weekBounds(period_start)` (Senin–Minggu) |
+| Validasi kategori | Kategori harus terlihat pengguna (sistem atau miliknya, belum dihapus) dan bertipe `expense` |
+| Irisan periode | Anggaran lain milik pengguna yang periodenya beririsan dijawab 409, tanpa memandang `period_type` |
+| Simpan | Anggaran + alokasi + audit `create` dalam satu transaksi DB |
+| Lapis kedua | Partial unique index `(user_id, period_type, period_start) WHERE deleted_at IS NULL` |
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | Body tidak valid, kategori pemasukan, atau alokasi melebihi total |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+| 404 | `NOT_FOUND` | `category_id` tidak ditemukan atau milik pengguna lain |
+| 409 | `CONFLICT` | Periode beririsan dengan anggaran lain |
+
+---
+
+#### `GET /budgets/current`
+
+| | |
+| --- | --- |
+| Tujuan | Anggaran aktif beserta progresnya, untuk beranda |
+| Auth | JWT |
+| Diproses oleh | `budgets.service.current` → `repository.findActive` + `SpendingReader` |
+
+Anggaran aktif adalah yang `period_start <= hari ini <= period_end` (Asia/Jakarta). Karena periode tidak boleh beririsan, paling banyak satu baris.
+
+**Respons 200** — `BudgetDetail` (Bagian 8.13), sama dengan `GET /budgets/{id}`.
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+| 404 | `NOT_FOUND` | `"Anggaran aktif tidak ditemukan"` |
+
+---
+
+#### `GET /budgets/{id}`
+
+| | |
+| --- | --- |
+| Tujuan | Detail anggaran beserta progres yang dihitung saat diminta |
+| Auth | JWT |
+| Diproses oleh | `budgets.service.get` → `repository.findById` + `SpendingReader.spendingInRange` |
+
+**Respons 200** — `BudgetDetail` (Bagian 8.13).
+
+**Pemrosesan progres:**
+
+| Field | Aturan |
+| --- | --- |
+| `spent_total` | Seluruh pengeluaran (`type=expense`, belum dihapus) pada rentang periode, termasuk kategori yang tidak dialokasikan |
+| `spent` per kategori | Hanya pengeluaran kategori tersebut; kategori tanpa pengeluaran bernilai 0 |
+| `percent` | `spent / batas × 100`, satu desimal; pembagian nol menghasilkan 0 |
+| `status` kategori | `ok` < `alert_threshold`; `warning` dari ambang sampai 100; `over` > 100 |
+| `status_total` | Sama, dengan ambang tetap 80 |
+| `remaining` | `batas − spent`; boleh negatif |
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+| 404 | `NOT_FOUND` | Id tidak ada, sudah dihapus, atau milik pengguna lain |
+
+---
+
+#### `PATCH /budgets/{id}`
+
+| | |
+| --- | --- |
+| Tujuan | Mengubah sebagian anggaran dan/atau alokasi kategori |
+| Auth | JWT |
+| Diproses oleh | `budgets.service.update` → `budgets.repository.update` |
+
+**Body** (minimal satu field; field tak dikenal diabaikan)
+
+| Field | Tipe | Validasi |
+| --- | --- | --- |
+| `name` | string | 1–100 karakter |
+| `total_amount` | integer | > 0 dan ≤ 2.147.483.647 |
+| `auto_renew` | boolean | — |
+| `rollover_enabled` | boolean | — |
+| `categories` | array | Minimal 1; `amount` wajib; `alert_threshold` opsional (tidak dikirim = nilai lama dipertahankan, baris baru 80) |
+
+`period_type`, `period_start`, dan `period_end` tidak boleh diubah (400). Tidak ada optimistic locking.
+
+**Contoh request**
+
+```http
+PATCH /budgets/11111111-1111-4111-8111-111111111111
+Authorization: Bearer eyJhbGciOi...
+Content-Type: application/json
+
+{
+  "name": "Anggaran revisi",
+  "categories": [
+    { "category_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "amount": 2500000 }
+  ]
+}
+```
+
+**Respons 200** — `Budget` (tanpa progres).
+
+**Pemrosesan:**
+
+| Langkah | Aturan |
+| --- | --- |
+| Alokasi | Upsert per `category_id`; kategori yang tidak dikirim dihapus |
+| `alert_sent_at` | Dipertahankan bila `amount` dan `alert_threshold` tidak berubah; direset ke `NULL` bila salah satunya berubah |
+| Total | Jumlah alokasi final tidak boleh melebihi `total_amount` final |
+| Audit | Hanya field yang berubah, `{ before, after }`, dalam transaksi yang sama |
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | Body kosong, field periode dikirim, alokasi melebihi total, atau kategori pemasukan |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+| 404 | `NOT_FOUND` | Id tidak ada, sudah dihapus, atau milik pengguna lain |
+
+---
+
+#### `DELETE /budgets/{id}`
+
+| | |
+| --- | --- |
+| Tujuan | Soft delete anggaran |
+| Auth | JWT |
+| Diproses oleh | `budgets.service.remove` → `budgets.repository.softDelete` |
+
+**Respons 204** — tanpa body. `deleted_at` diisi, audit `delete` ditulis, dan periode dibebaskan untuk anggaran baru.
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+| 404 | `NOT_FOUND` | Id tidak ada, sudah dihapus, atau milik pengguna lain |
+
+---
+
 #### `GET /transactions`
 
 | | |
@@ -1764,7 +2179,7 @@ Minimal satu field selain `updated_at` (`"Minimal satu field selain updated_at h
 
 **Respons 200** — `WhatsappStatus` setelah diubah (status `verified`).
 
-**Catatan:** hanya menyimpan nilai. Tidak ada fitur yang membaca kedua sakelar ini (ringkasan harian dan peringatan anggaran tidak diimplementasikan).
+**Catatan:** kedua sakelar dibaca job terjadwal: `daily_summary_enabled` oleh `daily-summary` (20.00 WIB) dan `budget_alert_enabled` oleh `budget-alert` (tiap 15 menit, hanya 07.00–22.00 WIB). Perubahan berlaku pada eksekusi jadwal berikutnya; pengiriman tetap lewat antrean `outbound`.
 
 **Error**
 
@@ -1772,6 +2187,104 @@ Minimal satu field selain `updated_at` (`"Minimal satu field selain updated_at h
 | --- | --- | --- |
 | 400 | `VALIDATION_ERROR` | `"Minimal satu field harus diisi"` |
 | 404 | `NOT_FOUND` | `"Pengaturan hanya tersedia setelah nomor WhatsApp terverifikasi"` |
+
+---
+
+#### `GET /notifications`
+
+| | |
+| --- | --- |
+| Tujuan | Riwayat notifikasi milik pemanggil, terbaru dulu |
+| Auth | JWT |
+| Diproses oleh | `notifications.service.list` → `repository.list` |
+| Rate limit | global |
+
+**Query**
+
+| Parameter | Tipe | Keterangan |
+| --- | --- | --- |
+| `status` | `pending \| sent \| failed \| read` | Opsional |
+| `limit` | integer | 1–100, bawaan 20 |
+| `cursor` | string | `next_cursor` halaman sebelumnya; opak |
+
+**Respons 200** — `NotificationList` (Bagian 8.15), urut `created_at DESC, id DESC`. `payload` tidak ditampilkan. Baris pengguna lain tidak pernah terlihat.
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | Status di luar daftar, cursor rusak, atau limit di luar 1–100 |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+
+---
+
+#### `PATCH /notifications/{id}/read`
+
+| | |
+| --- | --- |
+| Tujuan | Menandai notifikasi sudah dilihat di aplikasi |
+| Auth | JWT |
+| Diproses oleh | `notifications.service.markRead` → `repository.markRead` (satu transaksi) |
+
+**Aturan transisi**
+
+| Status awal | Hasil |
+| --- | --- |
+| `sent` | 200; status menjadi `read`, `sent_at` dipertahankan |
+| `read` | 200 (idempoten), tidak ada perubahan |
+| `pending` | 409 `CONFLICT` — pesan belum terkirim |
+| `failed` | 409 `CONFLICT` — pesan tidak akan tiba |
+
+**Respons 200** — `Notification` (Bagian 8.15) dengan `status: "read"`.
+
+**Catatan:** `read` berarti "sudah dilihat di aplikasi". Untuk kanal WhatsApp tidak ada bukti baca.
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | `{id}` bukan UUID |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
+| 404 | `NOT_FOUND` | Notifikasi tidak ada atau milik pengguna lain |
+| 409 | `CONFLICT` | Status awal `pending` atau `failed` (`details`: `status`/`invalid_transition`) |
+
+---
+
+#### `GET /audit-logs`
+
+| | |
+| --- | --- |
+| Tujuan | Riwayat perubahan transaksi dan anggaran milik pemanggil, terbaru dulu |
+| Auth | JWT |
+| Diproses oleh | `audit-logs.service.list` → `repository.list` |
+| Rate limit | global |
+
+**Query**
+
+| Parameter | Tipe | Keterangan |
+| --- | --- | --- |
+| `entity_type` | `transaction \| budget` | Opsional; nilai lain → 400 |
+| `entity_id` | UUID | Opsional |
+| `limit` | integer | 1–100, bawaan 20 |
+| `cursor` | string | `next_cursor` halaman sebelumnya; opak |
+
+**Respons 200** — `AuditLogList` (Bagian 8.16), urut `created_at DESC, id DESC`. Hanya baris `user_id = pemanggil` yang terlihat. `id`, `user_id`, dan `ip_address` tidak pernah ditampilkan; `id` hanya berada di dalam cursor opak.
+
+`changes` disaring allowlist per jenis entitas:
+
+| `entity_type` | Kunci yang dipertahankan |
+| --- | --- |
+| `transaction` | `type`, `amount`, `date`, `description`, `category_id`, `account_id` |
+| `budget` | `name`, `total_amount`, `categories`, `auto_renew` |
+
+Struktur `{ before, after }` dipertahankan; kunci di luar allowlist dibuang. Modul ini tidak menulis audit: baris tetap dibuat di repository transaksi dan anggaran pada transaksi database yang sama.
+
+**Error**
+
+| Status | Code | Pesan / kondisi |
+| --- | --- | --- |
+| 400 | `VALIDATION_ERROR` | `entity_type` di luar daftar, `entity_id` bukan UUID, cursor rusak, atau limit di luar 1–100 |
+| 401 | `UNAUTHORIZED` | Tanpa atau token tidak valid |
 
 ---
 
@@ -1975,6 +2488,7 @@ Semua skema respons didefinisikan dengan Zod dan menjadi komponen OpenAPI dengan
 | `month.net` | integer | `income − expense`; bisa negatif |
 | `cashflow[]` | `{ date, income, expense }` | Satu entri per hari yang punya transaksi, naik |
 | `recent_transactions` | `Transaction[]` | Saat ini maks. 5 (skema mengizinkan ≤ 10) |
+| `budget_summary` | `BudgetSummary \| null` | Anggaran aktif; `null` bila tidak ada (Bagian 8.14) |
 
 ### 8.9 `MessageResponse`
 
@@ -1992,6 +2506,109 @@ Semua skema respons didefinisikan dengan Zod dan menjadi komponen OpenAPI dengan
 | `error.details[].attempts_left` | integer | Tidak | Verifikasi OTP |
 | `error.details[].retry_after_seconds` | integer | Tidak | `RATE_LIMITED` |
 
+### 8.11 `MonthlyReport`
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `month` | string | `YYYY-MM` |
+| `income_total` | integer | Total pemasukan bulan itu |
+| `expense_total` | integer | Total pengeluaran bulan itu |
+| `net` | integer | `income_total − expense_total`; bisa negatif |
+| `by_category[]` | `{ category_id, name, slug, type, total, percent }` | Kategori yang punya transaksi, urut `total` menurun |
+| `by_category[].type` | `income \| expense` | Tipe kategori |
+| `by_category[].percent` | number | Satu desimal, terhadap total tipe yang sama; jumlah per tipe boleh 99,9–100,1 |
+| `daily[]` | `{ date, income, expense }` | Setiap tanggal dalam bulan, urut naik; hari tanpa transaksi bernilai 0 |
+
+### 8.12 `TrendReport`
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `months[]` | `{ month, income, expense, net }` | Urut menaik, termasuk bulan tanpa transaksi (0) |
+| `months[].month` | string | `YYYY-MM` |
+| `months[].net` | integer | `income − expense`; bisa negatif |
+
+### 8.13 `Budget`, `BudgetDetail`, dan `BudgetList`
+
+`Budget` — dipakai respons `POST /budgets` dan `PATCH /budgets/{id}`.
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `id` | UUID | — |
+| `name` | string \| null | Opsional |
+| `period_type` | `monthly \| weekly` | — |
+| `period_start`, `period_end` | date | `YYYY-MM-DD`; sudah dinormalkan server |
+| `total_amount` | integer | Rupiah penuh > 0 |
+| `auto_renew` | boolean | Disimpan; job `renew-budgets` membuat periode berikutnya secara otomatis |
+| `rollover_enabled` | boolean | Disimpan tanpa efek |
+| `categories[]` | `BudgetCategory` | Urut `sort_order` kategori |
+| `created_at` | timestamp | ISO 8601 UTC |
+
+`BudgetCategory`: `{ category_id, name, slug, amount, alert_threshold }`. `name` dan `slug` disalin dari kategori saat dibaca, sehingga berganti nama tetap terlihat.
+
+`BudgetDetail` — dipakai `GET /budgets/{id}` dan `GET /budgets/current`. Semua field `Budget`, ditambah:
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `spent_total` | integer | Seluruh pengeluaran periode, termasuk kategori tak teralokasi |
+| `remaining_total` | integer | `total_amount − spent_total`; bisa negatif |
+| `percent_total` | number | Satu desimal; pembagian nol = 0 |
+| `status_total` | `ok \| warning \| over` | Ambang tetap 80% |
+| `categories[]` | `BudgetCategoryProgress` | `BudgetCategory` + `spent`, `remaining`, `percent`, `status` (ambang `alert_threshold`) |
+
+`BudgetList`: `{ data: Budget[] }`, tanpa cursor dan tanpa progres.
+
+### 8.14 `BudgetSummary`
+
+Dipakai `budget_summary` di `GET /dashboard`; `null` bila tidak ada anggaran aktif.
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `budget_id` | UUID | — |
+| `name` | string \| null | — |
+| `period_start`, `period_end` | date | `YYYY-MM-DD` |
+| `total` | integer | `total_amount` |
+| `used` | integer | Seluruh pengeluaran periode |
+| `remaining` | integer | `total − used`; bisa negatif |
+| `percent` | number | Satu desimal |
+| `status` | `ok \| warning \| over` | Ambang tetap 80% |
+
+### 8.15 `Notification` dan `NotificationList`
+
+Dipakai `GET /notifications` dan `PATCH /notifications/{id}/read`.
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `id` | UUID | — |
+| `type` | `budget_alert \| daily_summary` | — |
+| `channel` | `whatsapp \| push \| in_app` | Sistem hanya membuat `whatsapp` |
+| `title` | string | Maksimal 150 karakter (kolom database) |
+| `body` | string | Teks pesan dari template, di bawah 600 karakter |
+| `status` | `pending \| sent \| failed \| read` | `read` = sudah dilihat di aplikasi |
+| `scheduled_for` | timestamp \| null | Waktu rencana kirim; null bila langsung |
+| `sent_at` | timestamp \| null | Diisi worker saat `sent`; dipertahankan saat `read` |
+| `created_at` | timestamp | ISO 8601 UTC |
+
+`payload` (JSONB) tidak pernah ditampilkan: hanya memuat id internal dan tanggal, tidak pernah nomor telepon atau isi pesan.
+
+`NotificationList`: `{ data: Notification[], next_cursor: string \| null, has_more: boolean }`, urut `created_at DESC, id DESC`.
+
+### 8.16 `AuditLogItem` dan `AuditLogList`
+
+Dipakai `GET /audit-logs`.
+
+| Field | Tipe | Keterangan |
+| --- | --- | --- |
+| `entity_type` | `transaction \| budget` | Jenis entitas asal |
+| `entity_id` | UUID | Id transaksi atau anggaran |
+| `action` | `create \| update \| delete \| restore` | — |
+| `actor_type` | `user \| system \| whatsapp` | `user` untuk REST, `system` untuk renewal, `whatsapp` untuk bot |
+| `changes` | `{ before?, after? } \| null` | Nilai JSON yang sudah disaring allowlist; kunci asing dibuang |
+| `created_at` | timestamp | ISO 8601 UTC |
+
+`id` BIGSERIAL, `user_id`, dan `ip_address` **tidak** termasuk respons. `id` hanya dipakai di `next_cursor`.
+
+`AuditLogList`: `{ data: AuditLogItem[], next_cursor: string \| null, has_more: boolean }`, urut `created_at DESC, id DESC`.
+
 ---
 
 ## 9. Database & Data Model
@@ -2003,12 +2620,12 @@ Semua skema respons didefinisikan dengan Zod dan menjadi komponen OpenAPI dengan
 | DBMS | PostgreSQL (Supabase); test memakai PostgreSQL 16 |
 | ORM | Prisma 6, `prisma-client-js` |
 | Koneksi | `DATABASE_URL` (pooler 6543, `?pgbouncer=true`) untuk runtime; `DIRECT_URL` (5432) untuk migrasi |
-| Sumber skema | `prisma/schema.prisma` + 5 migrasi SQL |
+| Sumber skema | `prisma/schema.prisma` + 7 migrasi (1 hasil generate + 6 SQL manual) |
 | Tabel | 13, semuanya di skema `public` |
 | Primary key | UUID `gen_random_uuid()`, kecuali `users.id` (sama dengan `auth.users.id`, tanpa default) dan `audit_logs.id` (`BIGSERIAL`) |
 | Uang | `INTEGER` rupiah penuh |
 | Waktu | `TIMESTAMPTZ(6)` UTC; tanggal kalender `DATE` |
-| Enum | Disimpan `VARCHAR`; nilai dijaga kode dan Zod (tidak ada enum PostgreSQL atau CHECK, kecuali `amount > 0`) |
+| Enum | Disimpan `VARCHAR`; nilai dijaga kode dan Zod (tidak ada enum PostgreSQL; CHECK hanya untuk nominal dan rentang tanggal, lihat 9.3) |
 
 **Urutan migrasi**
 
@@ -2019,6 +2636,8 @@ Semua skema respons didefinisikan dengan Zod dan menjadi komponen OpenAPI dengan
 | `20260930100200_link_users_to_auth` | FK `users.id → auth.users(id) ON DELETE CASCADE` (dilewati bila skema `auth` tidak ada, mis. shadow DB) |
 | `20260930100300_add_rls_policies` | RLS aktif di 13 tabel; policy SELECT untuk role `authenticated` |
 | `20260930100400_enable_realtime_transactions` | `REPLICA IDENTITY FULL` + publication `supabase_realtime` untuk `transactions` |
+| `20261111000000_add_budget_constraints` | Partial unique `budgets_user_period_key (user_id, period_type, period_start) WHERE deleted_at IS NULL`; CHECK `budgets.total_amount > 0`, `budgets.period_end >= period_start`, `budget_categories.amount > 0`, `budget_categories.alert_threshold BETWEEN 1 AND 100` |
+| `20261112000000_add_daily_summary_unique` | Unique expression index `notifications_daily_summary_key (user_id, type, (payload->>'date')) WHERE type = 'daily_summary'` untuk idempotensi ringkasan harian (Q12) |
 
 ### 9.2 ERD
 
@@ -2255,7 +2874,7 @@ Hanya ditulis saat proses API memeriksa status sesi (penerbitan OTP).
 
 Index: `(user_id, deleted_at)`. Tidak ada constraint "satu default per pengguna".
 
-#### `categories` — dipakai: auth (salin), categories, transactions (validasi), worker (kamus parser)
+#### `categories` - dipakai: auth (salin), categories, transactions (validasi), reports (nama/slug), worker (kamus parser)
 
 | Kolom | Tipe | Null | Keterangan |
 | --- | --- | --- | --- |
@@ -2281,7 +2900,7 @@ Kategori sistem dari seed (`prisma/seed-data.ts`):
 
 Catatan dari komentar seed: lima kategori pemasukan tidak didaftar di dokumen rancangan mana pun; nama, slug, dan kata kuncinya adalah usulan implementasi.
 
-#### `transactions` — dipakai: transactions, dashboard, worker
+#### `transactions` - dipakai: transactions, dashboard, reports, worker
 
 | Kolom | Tipe | Null | Keterangan |
 | --- | --- | --- | --- |
@@ -2324,29 +2943,73 @@ Index: `(user_id, category_id, date)`, `(source_message_id)`, partial `(user_id,
 
 Constraint/index: **UNIQUE `(session_id, wa_message_id)`** (fondasi idempotency), `(user_id, created_at DESC)`, `(status, created_at)`. Balasan keluar **tidak** dicatat sebagai baris `outbound`.
 
-#### `audit_logs` — dipakai: transactions (tulis)
+#### `audit_logs` — dipakai: transactions, budgets (tulis), audit-logs (baca)
 
 | Kolom | Tipe | Null | Keterangan |
 | --- | --- | --- | --- |
 | `id` | BIGSERIAL | Tidak | PK; satu-satunya BigInt, tidak pernah masuk respons |
 | `user_id` | UUID | Ya | FK SET NULL |
-| `entity_type` | VARCHAR(50) | Tidak | Kode hanya menulis `transaction` |
+| `entity_type` | VARCHAR(50) | Tidak | Kode menulis `transaction` atau `budget` |
 | `entity_id` | UUID | Tidak | |
 | `action` | VARCHAR(20) | Tidak | `create` \| `update` \| `delete` \| `restore` |
 | `changes` | JSONB | Ya | create: `{ after }`; update: `{ before, after }` field yang berubah; delete/restore: `deleted_at` |
 | `actor_type` | VARCHAR(20) | Tidak | `user` (REST) \| `whatsapp` (bot) |
 | `ip_address` | INET | Ya | REST saja |
 
-Index: `(entity_type, entity_id)`, `(user_id, created_at DESC)`. Tidak ada endpoint pembaca.
+Index: `(entity_type, entity_id)`, `(user_id, created_at DESC)`. Pembaca: `GET /audit-logs`; `id` hanya dipakai di cursor opak dan tidak pernah masuk respons.
+
+#### `budgets` — dipakai: budgets, dashboard
+
+| Kolom | Tipe | Null | Keterangan |
+| --- | --- | --- | --- |
+| `id` | UUID | Tidak | PK |
+| `user_id` | UUID | Tidak | FK → users CASCADE |
+| `name` | VARCHAR(100) | Ya | Opsional |
+| `period_type` | VARCHAR(10) | Tidak | `monthly` \| `weekly` |
+| `period_start`, `period_end` | DATE | Tidak | Batas periode; `CHECK (period_end >= period_start)` |
+| `total_amount` | INTEGER | Tidak | `CHECK (total_amount > 0)` |
+| `auto_renew` | BOOLEAN | Tidak | Bawaan `true`; dijalankan job `renew-budgets` (00.05 WIB) |
+| `rollover_enabled` | BOOLEAN | Tidak | Bawaan `false`; disimpan dan disalin saat perpanjangan, tetapi belum berpengaruh |
+| `created_at` | TIMESTAMPTZ | Tidak | |
+| `deleted_at` | TIMESTAMPTZ | Ya | Soft delete |
+
+Index: `(user_id, period_start, period_end)`; partial unique `budgets_user_period_key (user_id, period_type, period_start) WHERE deleted_at IS NULL`.
+
+#### `budget_categories` — dipakai: budgets (lewat anggaran milik pengguna)
+
+| Kolom | Tipe | Null | Keterangan |
+| --- | --- | --- | --- |
+| `id` | UUID | Tidak | PK |
+| `budget_id` | UUID | Tidak | FK → budgets CASCADE |
+| `category_id` | UUID | Tidak | FK → categories RESTRICT |
+| `amount` | INTEGER | Tidak | `CHECK (amount > 0)`; jumlah per anggaran ≤ `budgets.total_amount` (dijaga service) |
+| `alert_threshold` | SMALLINT | Tidak | Bawaan 80; `CHECK BETWEEN 1 AND 100` |
+| `alert_sent_at` | TIMESTAMPTZ | Ya | Mencegah peringatan berulang; direset bila alokasi berubah atau enqueue `outbound` gagal |
+
+Constraint: UNIQUE `(budget_id, category_id)`. Tidak punya `user_id`; akses selalu lewat anggaran yang dimiliki.
+
+#### `notifications` — dipakai: notifications (riwayat), worker outbound (status kirim), job `daily-summary`/`budget-alert` (pembuat baris)
+
+| Kolom | Tipe | Null | Keterangan |
+| --- | --- | --- | --- |
+| `id` | UUID | Tidak | PK |
+| `user_id` | UUID | Tidak | FK → `users` CASCADE |
+| `type` | VARCHAR(30) | Tidak | `budget_alert` atau `daily_summary` (dijaga Zod) |
+| `channel` | VARCHAR(20) | Tidak | `whatsapp`, `push`, atau `in_app`; sistem hanya membuat `whatsapp` |
+| `title` | VARCHAR(150) | Tidak | Judul dari template |
+| `body` | TEXT | Tidak | Teks pesan dari template, di bawah 600 karakter |
+| `payload` | JSONB | Ya | Hanya id internal dan tanggal; tidak pernah nomor telepon, OTP, isi pesan, atau alasan gagal |
+| `status` | VARCHAR(20) | Tidak | `pending`, `sent`, `failed`, `read` |
+| `scheduled_for` | TIMESTAMPTZ | Ya | Null berarti langsung siap dikirim |
+| `sent_at` | TIMESTAMPTZ | Ya | Diisi worker saat status menjadi `sent`; dipertahankan saat `read` |
+
+Index: `(user_id, created_at DESC)` untuk riwayat; `(status, scheduled_for)` untuk pemindaian job; unique expression `(user_id, type, (payload->>'date')) WHERE type = 'daily_summary'` untuk idempotensi ringkasan harian. Tidak punya `deleted_at`: riwayat tidak pernah dihapus (PHASE2-DECISIONS §5.17). Alasan kegagalan tidak disimpan karena tidak ada kolomnya.
 
 #### Tabel tanpa kode aplikasi
 
 | Tabel | Isi kolom utama | Status |
 | --- | --- | --- |
-| `budgets` | `name`, `period_type`, `period_start`, `period_end`, `total_amount`, `auto_renew`, `rollover_enabled`, `deleted_at` | Not implemented (hanya skema) |
-| `budget_categories` | `budget_id`, `category_id`, `amount`, `alert_threshold` (80), `alert_sent_at`; UNIQUE `(budget_id, category_id)` | Not implemented |
 | `recurring_transactions` | `account_id`, `category_id`, `type`, `amount`, `frequency`, `day_of_month`, `day_of_week`, `start_date`, `end_date`, `next_run_date`, `is_active` | Not implemented |
-| `notifications` | `type`, `channel`, `title`, `body`, `payload`, `status`, `scheduled_for`, `sent_at` | Not implemented |
 
 ### 9.4 Hubungan tabel dengan endpoint
 
@@ -2354,13 +3017,20 @@ Index: `(entity_type, entity_id)`, `(user_id, created_at DESC)`. Tidak ada endpo
 | --- | --- | --- |
 | `POST /auth/register`, login/google pertama | `users`, `categories` (sistem) | `users`, `accounts`, `categories` |
 | `GET/PATCH /me`, `POST /me/onboarding/complete` | `users` | `users` |
-| `GET /dashboard` | `users`, `transactions`, `categories`, `accounts` | — |
+| `GET /dashboard` | `users`, `transactions`, `categories`, `accounts`, `budgets` | — |
+| `/reports/*` | `transactions`, `categories` | — |
+| `/budgets*` | `budgets`, `budget_categories`, `categories`, `transactions` (progres) | `budgets`, `budget_categories`, `audit_logs` |
 | `/transactions*` | `transactions`, `categories`, `accounts`, `message_logs` | `transactions`, `audit_logs` |
 | `GET /categories` | `categories` | — |
 | `GET /accounts` | `accounts` | — |
+| `GET /notifications` | `notifications` | — |
+| `PATCH /notifications/{id}/read` | `notifications` | `notifications.status` |
+| `GET /audit-logs` | `audit_logs` | — |
 | `/whatsapp/*` | `whatsapp_accounts`, `whatsapp_verifications` | `whatsapp_accounts`, `whatsapp_verifications`, `whatsapp_sessions` |
 | `POST /webhooks/openwa/*` | — | `message_logs` |
 | Worker inbound | `message_logs`, `whatsapp_accounts`, `categories`, `accounts`, `transactions` | `message_logs`, `transactions`, `audit_logs`, `whatsapp_accounts.last_message_at` |
+| Worker outbound | `notifications` | `notifications.status`, `notifications.sent_at` |
+| Worker scheduled (`daily-summary`, `budget-alert`, `renew-budgets`) | `whatsapp_accounts`, `budgets`, `budget_categories`, `transactions` | `notifications`, `budget_categories.alert_sent_at`, `budgets` (perpanjangan), `audit_logs` |
 
 ### 9.5 Row Level Security dan Realtime
 
@@ -2381,7 +3051,7 @@ Semua policy hanya untuk role `authenticated` dan hanya SELECT; semua penulisan 
 | `pending:{user_id}` | JSON `Pending` (Bagian 5.5), divalidasi `pendingSchema` saat dibaca | 15 menit | `lib/pendingState.ts` |
 | `lock:user:{user_id}` | Token UUID pemilik | 30 detik (PX) | `lib/userLock.ts` |
 | `invite:{chat_id}` | `"1"` | 24 jam | `workers/inbound.processor.ts` |
-| `bull:inbound:*`, `bull:outbound:*` | Struktur BullMQ (prefix bawaan `bull`) | `removeOnComplete` 1 jam / 1.000 job; `removeOnFail` 7 hari | `queues/` |
+| `bull:inbound:*`, `bull:outbound:*`, `bull:scheduled:*` | Struktur BullMQ (prefix bawaan `bull`) | `removeOnComplete` 1 jam / 1.000 job; `removeOnFail` 7 hari | `queues/` |
 
 Isi `pending` hanya angka, slug, dan id (tidak pernah teks balasan).
 
@@ -2423,7 +3093,8 @@ Diakses hanya lewat Prisma (dan satu `$queryRaw` berparameter di `transactions.r
 | Antrean | Produsen | Konsumen | Data job | Opsi |
 | --- | --- | --- | --- | --- |
 | `inbound` | Proses API (webhook controller) | Worker, concurrency 5 | `{ message_log_id: uuid }`, `jobId` = id itu | 3 percobaan, backoff eksponensial 1 s |
-| `outbound` | Proses API (OTP), worker (balasan bot) | Worker, concurrency 1, jeda acak 2–5 s | `{ wa_chat_id, text, message_log_id? }`; balasan memakai `jobId: reply-<message_log_id>` | 3 percobaan, backoff eksponensial 5 s |
+| `outbound` | Proses API (OTP), worker (balasan bot, job terjadwal) | Worker, concurrency 1, jeda acak 2–5 s | `{ wa_chat_id, text, message_log_id?, notification_id? }`; balasan memakai `jobId: reply-<message_log_id>`; job terjadwal memakai `daily:{user_id}:{tanggal}` atau `alert:{budget_category_id}:{periode}` dan opsi `delay` | 3 percobaan, backoff eksponensial 5 s |
+| `scheduled` | Worker (BullMQ job scheduler saat start) | Worker, concurrency 1 | `{}`; nama job `daily-summary`, `budget-alert`, `renew-budgets` | 3 percobaan, backoff eksponensial 1 s; jadwal `0 20 * * *`, `*/15 * * * *`, `5 0 * * *` zona `Asia/Jakarta` |
 
 Dua jenis koneksi (`config/redis.ts`): koneksi BullMQ (`maxRetriesPerRequest: null`) dan klien helper yang gagal cepat (3 percobaan) untuk lock, pending, dan invite. Semua koneksi memasang listener `error` ke log.
 
@@ -2463,11 +3134,30 @@ Respons divalidasi Zod (`{ success: boolean, response?: unknown }`).
 
 | | |
 | --- | --- |
-| Status | **Partial.** Kontrak dan validasi ada; tidak dirakit ke pipeline |
-| Kode | `src/gateways/llm/` |
-| Konfigurasi | `LLM_PROVIDER` hanya menerima `disabled`; `LLM_API_KEY` dibaca tetapi tidak dipakai |
+| Status | **Implemented.** `createLlmGateway()` dirakit di `src/worker.ts` dan diteruskan ke `src/workers/pipeline.ts`. Ada dua jalur: klasifikasi (bawaan) dan jawaban bebas (`LLM_REPLY_MODE=freeform`, opt-in). Default tetap `DisabledLlmGateway` (`LLM_PROVIDER=disabled`) dengan mode `template`. |
+| Kode | `src/gateways/llm/` (`groq.gateway.ts`, `llm.gateway.ts`, `index.ts`, `mock.gateway.ts`, `disabled.gateway.ts`) |
+| Konfigurasi | `LLM_PROVIDER` = `disabled` \| `groq`. `groq` butuh `LLM_API_KEY` (wajib; gagal start kalau kosong). `LLM_BASE_URL`, `LLM_MODEL` opsional (bawaan Groq: `https://api.groq.com/openai/v1`, `qwen/qwen3.8-27b`). `LLM_REPLY_MODE` = `template` (bawaan) \| `freeform`; `freeform` butuh `LLM_PROVIDER` selain `disabled` (gagal start). |
 
-Kontrak `LlmClassificationSchema` (strict): `intent`, `type`, `category_hint` (≤ 64), `description` (≤ 255), `confidence` (0–1). **Tidak ada `amount` atau `date`**; keluaran yang membawanya ditolak utuh. `safeClassify` menerapkan timeout 3 detik dan ambang confidence 0,7, mengembalikan `null` (= tanya pengguna) untuk semua kegagalan. Tidak ada request jaringan ke penyedia LLM mana pun di source code.
+#### 10.5.1 Jalur klasifikasi (selalu aktif bila provider aktif)
+
+Kontrak `LlmClassificationSchema` (strict): `intent`, `type`, `category_hint` (≤ 64), `description` (≤ 255), `confidence` (0–1). **Tidak ada `amount` atau `date`**; keluaran yang membawanya ditolak utuh. `safeClassify` menerapkan timeout 3 detik dan ambang confidence 0,7, mengembalikan `null` (= tanya pengguna) untuk semua kegagalan. Request jaringan hanya terjadi bila `LLM_PROVIDER=groq` dan kunci valid.
+
+Klasifikasi hanya menjadi **cadangan**: dipanggil ketika kamus kategori (`category_hint`) atau regex intent tidak memutuskan. Nominal, tanggal, dan tipe tetap dari parser deterministik; `description` dari LLM tidak dipakai untuk menyimpan transaksi.
+
+#### 10.5.2 Jalur jawaban bebas (`LLM_REPLY_MODE=freeform`)
+
+> **Penyimpangan sadar dari aturan proyek 3** ("teks balasan selalu dari template"). Mode ini opt-in, bawaan tetap `template`, dan hanya menyentuh pesan yang **tidak bisa diproses deterministik**.
+
+- **Dipakai hanya untuk:** `UNKNOWN` (setelah klasifikasi tidak menemukan aksi), `QUERY`, dan `CORRECT` — semuanya hanya bila tidak ada state pending dan pesan bukan command (`/...`).
+- **Tidak pernah dipakai untuk:** pencatatan transaksi, konfirmasi (`YA`/`BATAL`), pertanyaan kategori/nominal, hapus, `HELP`, media, OTP, notifikasi, dan seluruh alur state machine. Pesan transaksi tetap menghasilkan balasan template.
+- **Guardrail berlapis:**
+  1. Prompt sistem melarang menyebut saldo/nominal/tanggal transaksi dan melarang mengaku sudah mencatat/mengubah/menghapus transaksi; pengguna diarahkan ke alur konfirmasi.
+  2. `sanitizeChatReply` membuang karakter kontrol, merapikan baris baru, memotong pada 600 karakter (batas kata), dan menolak jawaban yang mengandung `Rp` + angka, angka berpemisah ribuan, angka ≥ 4 digit (kecuali tahun 1900–2199), atau sufiks `ribu`/`rb`/`juta`/`jt`/`k`.
+  3. `safeChat` menerapkan timeout 3 detik dan mengembalikan `null` untuk semua kegagalan (HTTP non-2xx, timeout, kosong, bukan teks, atau kena guard). `null` berarti balasan template lama yang dikirim.
+- **Data ke penyedia:** hanya teks pesan (dipotong 500 karakter), ditambah prompt sistem tetap. Tidak ada `user_id`, nomor WhatsApp, riwayat transaksi, saldo, atau data pengguna lain.
+- **Model:** `qwen/qwen3.8-27b` lewat Groq (kompatibel OpenAI), `temperature: 0.3`, `max_tokens: 300`.
+- **Observabilitas:** setiap panggilan melaporkan outcome (`ok`, `timeout`, `invalid`, `low_confidence`, `empty`, `error` + status HTTP) ke log. Isi pesan, jawaban, dan kunci tidak pernah dicatat. Saat worker start, provider/model/mode dicatat sekali tanpa kunci.
+- **Test:** unit (`llm-gateway`, `llm-groq-gateway`, `whatsapp-llm`) dan integrasi (`whatsapp-conversation`, mode freeform dengan `MockLlmGateway`) memastikan jawaban bebas sampai ke WhatsApp, nominal dibuang, kegagalan jatuh ke template, dan alur transaksi tidak berubah.
 
 ---
 
@@ -2585,8 +3275,9 @@ Rate limit:
 | Lock tidak didapat | `UserLockTimeoutError` → diulang BullMQ (3 percobaan) |
 | Percobaan inbound habis | `message_logs.status = failed`, `error` = pesan error |
 | Sesi WhatsApp terputus | Job outbound ditunda 30 detik, tidak memakai percobaan |
-| Job outbound > 1 jam | `UnrecoverableError`, tidak dikirim |
-| Percobaan outbound habis | Log `error`; `message_logs.error = 'reply_failed'` bila ada `message_log_id` |
+| Job outbound > 1 jam | `UnrecoverableError`, tidak dikirim; bila punya `notification_id`, status `notifications` menjadi `failed` |
+| Percobaan outbound habis | Log `error`; `message_logs.error = 'reply_failed'` bila ada `message_log_id`; status `notifications` menjadi `failed` bila ada `notification_id` |
+| Penandaan status notifikasi gagal | Hanya di-log (`send_failed`/`expired`/`invalid_job`); job tidak diulang karena pesan sudah terkirim |
 | `uncaughtException` / `unhandledRejection` | Log `fatal`, shutdown bersih, exit 1 |
 
 ### 11.6 Logging
@@ -2595,7 +3286,7 @@ Rate limit:
 | --- | --- |
 | Pustaka | pino, level dari `LOG_LEVEL` (bawaan `info`); JSON ke stdout, `pino-pretty` saat `development` |
 | Log request HTTP | **Tidak ada** (tidak ada access log / `pino-http`) |
-| Yang dicatat | Error 500 (`err`, `method`, `path`); event webhook diabaikan (`debug`, atau `info` untuk event tak dikenal); kegagalan enqueue; kegagalan Supabase saat forgot-password; status sesi WA gagal dicatat (`warn`); siklus hidup worker; job gagal; pesan dari nomor tak dikenal (`info`, nomor disamarkan `628xxxxxx789`) |
+| Yang dicatat | Error 500 (`err`, `method`, `path`); event webhook diabaikan (`debug`, atau `info` untuk event tak dikenal); kegagalan enqueue (termasuk job terjadwal) dan kegagalan menandai notifikasi; kegagalan Supabase saat forgot-password; status sesi WA gagal dicatat (`warn`); siklus hidup worker; job gagal; pesan dari nomor tak dikenal (`info`, nomor disamarkan `628xxxxxx789`) |
 | Yang sengaja tidak dicatat | Isi body webhook, nominal, isi pesan OTP |
 | Korelasi | `correlation_id` disimpan di `message_logs`, tetapi **tidak** disertakan di baris log mana pun |
 | Berkas log | Tidak ada; folder `logs/` hanya `.gitkeep` |
@@ -2617,7 +3308,7 @@ Urutan berlaku menurut `CLAUDE.md`: `LOCAL-MODE.md` menang atas `ARCHITECTURE.md
 
 ### 12.2 Arsitektur yang digunakan saat ini
 
-Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digantikan REST client; LLM tidak ada di jalur mana pun; OpenWA 4.76.0 (bukan v5) dengan tambalan; Supabase Auth penuh; tiga dari empat kelompok fitur Phase 2 hanya berupa tabel.
+Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digantikan REST client; LLM hanya cadangan klasifikasi dan default mati; OpenWA 4.76.0 (bukan v5) dengan tambalan; Supabase Auth penuh; keempat kelompok fitur Phase 2 sudah diimplementasikan (reports, budgets, notifications, audit-logs) lengkap dengan tiga job terjadwal (ringkasan harian, peringatan anggaran, perpanjangan anggaran). `audit-logs` hanya membaca tabel yang tetap diisi repository transaksi dan anggaran.
 
 ### 12.3 Tabel perbandingan
 
@@ -2651,14 +3342,18 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | Aspek | Rancangan Awal | Implementasi Saat Ini | Status | Catatan |
 | --- | --- | --- | --- | --- |
 | Base URL | `/v1` | Tanpa prefiks | Changed | `API.md` B1: ditunda untuk proyek lokal |
-| 25 endpoint `API.md` + `/health` | — | Semua ada | Implemented | Diverifikasi terhadap router |
+| 25 endpoint `API.md` + `/health` | — | Semua ada, ditambah laporan, anggaran, dan notifikasi Phase 2 | Implemented | Diverifikasi terhadap router dan `tests/unit/openapi.test.ts` |
 | `/api-docs`, `/api-docs.json` | Tidak di `API.md` | Ada | New | Dari `config/swagger.ts` |
 | `GET /transactions/summary` | `ARCHITECTURE.md` B12 | Tidak ada; agregasi internal di `transactions.summary.ts` | Not implemented | `API.md` B12 |
 | `DELETE /me` | `ARCHITECTURE.md` B12 | Tidak ada | Not implemented | `API.md` B12 |
 | CRUD kategori, `POST /accounts` | Phase 2 | Tidak ada | Not implemented | `LOCAL-MODE.md` |
-| `/budgets*`, `/reports*` | `ARCHITECTURE.md` B12 | Tidak ada | Not implemented | `LOCAL-MODE.md` |
+| `/budgets*` | `ARCHITECTURE.md` B12 | 6 endpoint: list, create, current, detail, patch, delete | Implemented | `claude/PHASE2-DECISIONS.md` Q2/Q3; `GET /budgets/current` tambahan |
+| `/notifications*` | Tidak ada di `API.md` maupun `ARCHITECTURE.md` B12 | `GET /notifications`, `PATCH /notifications/{id}/read` | New | `claude/PHASE2-DECISIONS.md` §3.3; kanal hanya `whatsapp` (Q8), status `read` tetap dibuat (Q7) |
+| `/audit-logs` | `ARCHITECTURE.md` B9: audit tidak pernah terekspos | `GET /audit-logs` (baca saja) | New | `claude/PHASE2-DECISIONS.md` Q11 opsi B; `id`/`user_id`/`ip_address` tidak ditampilkan |
+| `/reports*` | `ARCHITECTURE.md` B12: `overview`, `by-category`, `export` | `GET /reports/monthly`, `GET /reports/trend` | Changed | `claude/PHASE2-DECISIONS.md` Q1: path berbeda; `overview`/`by-category` tidak dibuat |
+| `/reports/export` | Ekspor CSV Phase 2 | Tidak ada | Not implemented | Q15: ditunda |
 | `/internal/wa-session*` | Admin | Tidak ada | Not implemented | Tidak ada peran admin |
-| Dashboard `budget_summary` | Ada | Dihilangkan | Changed | `API.md` B5 |
+| Dashboard `budget_summary` | Ada | Ada, nullable (`total`/`used`) | Implemented | `API.md` B5; `PHASE2-DECISIONS.md` Q14 |
 | Dashboard `recent_transactions` | 5 (`ARCHITECTURE.md` B18), "hingga 10" (`API.md` B5) | 5 | Changed (terhadap `API.md`) | Komentar kode: "beranda menampilkan 5" |
 | Kode `SERVICE_UNAVAILABLE` | 503 tanpa kode | Kode ke-8 | New | `API.md` B1.3 |
 | `POST /me/onboarding/complete` | Tidak ada di `API.md` | Ada (modul `users`) | New | Mengisi `users.onboarding_completed_at`; tanpa body, waktu dari server |
@@ -2674,7 +3369,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | Identitas pengirim | `wa_chat_id` `@c.us` | `wa_chat_id` di `message_logs` berupa LID; pencocokan lewat `raw_payload.data.sender.phoneNumber` | Changed | Spike P0 |
 | Fase sinkron < 100 ms, idempotency unique | Ada | Ada | Implemented | Tanpa `webhooks.service.ts` |
 | Pemantauan sesi | Webhook `session.state.changed` + alert | Tanpa webhook. API mem-polling `getConnectionState` saat OTP (cache 10 detik); worker memeriksa sebelum tiap kirim | Changed | `LOCAL-MODE.md` merencanakan polling berkala dari worker; tidak ada polling berkala |
-| Antrean | `inbound`, `outbound`, `scheduled` | `inbound`, `outbound` | Partial | `scheduled` untuk Phase 2 |
+| Antrean | `inbound`, `outbound`, `scheduled` | `inbound`, `outbound`, `scheduled` | Implemented | `scheduled` memakai BullMQ job scheduler (bukan cron sistem); tiga job idempoten |
 | Outbound concurrency 1, jeda 2–5 detik | Ada | Ada, dijaga test | Implemented | |
 | Sesi terputus | Balasan terkirim saat pulih | Ditunda 30 detik berulang; digugurkan setelah 1 jam | Changed | Komentar kode: balasan basi lebih membingungkan |
 | Lock per pengguna | Lock sebelum identifikasi pengguna | Identifikasi dulu, lalu lock | Changed | Kunci lock memuat `user_id` (komentar `inbound.processor.ts`) |
@@ -2690,8 +3385,8 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | Aspek | Rancangan Awal | Implementasi Saat Ini | Status | Catatan |
 | --- | --- | --- | --- | --- |
 | Pipeline enam tahap regex | Ada | Ada; tanggal diekstraksi sebelum nominal | Implemented | Agar "tanggal 25" tidak terbaca nominal |
-| LLM sebagai cadangan kategori | Dipanggil worker saat kamus gagal | Tidak dipanggil; kamus gagal → bot bertanya | Changed | `LOCAL-MODE.md` |
-| `LlmGateway` dibangun | Interface + `DisabledLlmGateway` | Ada, tetapi tidak dirakit ke pipeline | Partial | Lihat C1 |
+| LLM sebagai cadangan kategori | Dipanggil worker saat kamus gagal | Dipanggil worker via `safeClassify` (timeout 3s, confidence ≥ 0.7); gagal → tanya pengguna. Mode `freeform` opt-in menambah `safeChat` untuk pesan non-deterministik | Implemented | `groq.gateway.ts`, `pipeline.ts` |
+| `LlmGateway` dibangun | Interface + `DisabledLlmGateway` | Dirakit di `pipeline.ts` → `ConversationLlm` port; default `DisabledLlmGateway` | Implemented | `createLlmGateway()` dipakai `worker.ts` |
 | Kategori tak dikenal → "Lainnya" | Ya | Tidak; bot menawarkan 3 kategori (tersering 90 hari, lalu urutan bawaan), "Lainnya" tidak diberi nomor | Changed | Mengikuti aturan "bertanya, tidak menebak" |
 | Intent `QUERY`, `CORRECT` | Phase 2 | Dikenali, dibalas "belum tersedia" | Not implemented | Sesuai fase |
 | Hapus transaksi terakhir | Phase 1 | Transaksi `whatsapp` dalam 24 jam, dengan konfirmasi | Implemented | |
@@ -2706,8 +3401,10 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | `transactions.date` | Kolom tanggal | Generated column dari `occurred_at` (Asia/Jakarta) | Implemented | Disunting tangan di migrasi |
 | Unique tautan aktif | `user_id WHERE deleted_at IS NULL` | `user_id WHERE status <> 'disabled'` | Changed | Tabel tidak punya `deleted_at` (komentar migrasi) |
 | Retensi `raw_payload` 30 hari | Cron | Tidak ada | Not implemented | |
-| `audit_logs` | Diisi + modul pembaca | Diisi untuk transaksi; tanpa modul | Partial | `LOCAL-MODE.md`: cukup `prisma studio` |
-| `budgets`, `budget_categories`, `recurring_transactions`, `notifications` | Fitur Phase 2 | Hanya tabel | Not implemented | `LOCAL-MODE.md`: skema lengkap sejak awal |
+| `audit_logs` | Diisi + modul pembaca | Diisi untuk transaksi dan anggaran; `GET /audit-logs` membaca baris milik pemanggil | Implemented | `PHASE2-DECISIONS.md` Q11 B; `id`/`user_id`/`ip_address` tidak ditampilkan |
+| `budgets`, `budget_categories` | Fitur Phase 2 | CRUD + progres + constraint + perpanjangan otomatis (`renew-budgets`) | Implemented | `PHASE2-DECISIONS.md` Q2/Q3/Q5 |
+| `notifications` | Fitur Phase 2 | Riwayat REST + template pesan; status kirim diisi worker outbound; job `daily-summary` dan `budget-alert` membuat barisnya | Implemented | `PHASE2-DECISIONS.md` Q7/Q8/Q9/Q12 |
+| `recurring_transactions` | Fitur Phase 2 | Hanya tabel | Not implemented | `LOCAL-MODE.md`: skema lengkap sejak awal |
 
 #### Struktur folder (terhadap `BACKEND-STRUCTURE.md` B2)
 
@@ -2735,7 +3432,8 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 1. **Webhook:** rancangan memeriksa header lalu langsung `INSERT`. Saat ini ada saringan `classify()` **sebelum** `INSERT` (grup, `ciphertext`, event lain), karena `ciphertext` berbagi `data.id` dengan pesan asli dan akan membuat pesan asli dibuang sebagai duplikat.
 2. **Identifikasi pengirim:** rancangan mencari `whatsapp_accounts.wa_chat_id = message.chatId`. Saat ini `chatId` adalah LID, sehingga worker mencocokkan `[sender.phoneNumber, chatId]` dan membalas ke `whatsapp_accounts.wa_chat_id` (`@c.us`).
 3. **OTP:** dikirim lewat antrean `outbound` yang sama dengan balasan bot (bukan dari jalur HTTP), sehingga ikut jeda 2–5 detik.
-4. **LLM:** tidak ada cabang ke LLM; kegagalan kamus selalu menjadi pertanyaan kategori.
+4. **LLM:** worker memanggil LLM via `safeClassify` saat kamus kategori gagal mengenali pesan (fallthrough `UNKNOWN` atau `clarify:category`). Timeout 3 detik, ambang confidence 0,7. Kegagalan (error/timeout/skema/confidence rendah) → `null` → percakapan bertanya pengguna. Nominal dan tanggal **tetap tidak pernah** dari LLM. Sejak mode `freeform` (opt-in, 10.5), gateway yang sama juga menjawab `UNKNOWN`/`QUERY`/`CORRECT` tanpa pending lewat `safeChat`; teks itu tidak pernah diparse dan selalu jatuh ke template bila gagal.
+5. **Notifikasi:** tidak dikirim langsung dari proses yang membuatnya. Baris `notifications` dibuat `pending` oleh job `daily-summary`/`budget-alert`, pesannya masuk antrean `outbound` dengan `notification_id`, dan worker yang mengubah status menjadi `sent`/`failed` lewat port `NotificationStatusPort`. Sakelar `daily_summary_enabled`/`budget_alert_enabled` benar-benar dibaca job; `renew-budgets` tidak mengirim pesan.
 
 ---
 
@@ -2745,7 +3443,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 
 | ID | Kategori | Temuan | Bukti | Dampak |
 | --- | --- | --- | --- | --- |
-| C1 | Fitur belum selesai | `LlmGateway` tidak dirakit. `createLlmGateway()` dan `safeClassify()` tidak dipanggil di luar `src/gateways/llm/`. Menyalakan LLM nanti butuh perubahan di pipeline/percakapan, bukan hanya mengganti implementasi seperti diklaim `LOCAL-MODE.md` | `grep` tidak menemukan pemakaian di `src/` | Rendah selama LLM dimatikan; `LLM_API_KEY` dibaca tetapi tidak berpengaruh |
+| C1 | Fitur belum selesai | `LlmGateway` tidak dirakit. `createLlmGateway()` dan `safeClassify()` tidak dipanggil di luar `src/gateways/llm/`. Menyalakan LLM nanti butuh perubahan di pipeline/percakapan, bukan hanya mengganti implementasi seperti diklaim `LOCAL-MODE.md` | `grep` tidak menemukan pemakaian di `src/` | **RESOLVED** — `createLlmGateway()` dirakit di `src/worker.ts` → `pipeline.ts` → `ConversationLlm` port; `groq.gateway.ts` implementasi; default tetap `DisabledLlmGateway` |
 | C2 | Inkonsistensi | `POST /auth/logout` memakai `signOut(token, 'global')` (mencabut semua sesi pengguna di semua perangkat), sedangkan OpenAPI dan `API.md` menyebut "mencabut refresh token sesi saat ini" | `src/lib/auth.ts` | Logout di satu perangkat mengeluarkan semua perangkat |
 | C3 | Keamanan | `POST /auth/reset-password` menerima **access token apa pun** yang sah (divalidasi `admin.getUser`), bukan hanya token pemulihan. Pemegang access token pengguna dapat mengganti password tanpa password lama | `src/lib/auth.ts` `resetPassword` | Access token yang bocor dapat dipakai mengambil alih akun |
 | C4 | Keamanan | `errorHandler` mencatat `req.path` pada error 500. Untuk rute webhook, path memuat `WEBHOOK_SECRET` | `src/middleware/errorHandler.ts` | Rahasia webhook masuk log saat terjadi error tak terduga (mis. DB mati) |
@@ -2757,16 +3455,20 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | C10 | Dead config | Limiter `whatsappLinkRequest` didefinisikan tetapi tidak dipasang | `rateLimiter.ts`, `whatsapp.routes.ts` | Membingungkan pembaca; kuota sebenarnya di service |
 | C11 | Inkonsistensi dokumen | `API.md`: "25 endpoint" sementara tabelnya 26 baris (termasuk `/health`); `recent_transactions` "hingga 10" vs kode 5; register "diperiksa terhadap daftar password bocor" vs B11.8 "tidak aktif"; kode 401 menyebut "header webhook salah" padahal rahasia di path | `claude/API.md` | Pembaca kontrak bisa salah paham |
 | C12 | Dokumen hilang | `ecosystem.config.js` (dijanjikan `LOCAL-MODE.md`) dan `claude/parser-cases.md` (dirujuk `CLAUDE.md`) tidak ada | Daftar berkas | Rujukan buntu |
-| C13 | Fitur belum selesai | `PATCH /whatsapp/preferences` menyimpan sakelar yang tidak dibaca fitur apa pun | Tidak ada pembaca `dailySummaryEnabled`/`budgetAlertEnabled` | Sakelar tanpa efek |
 | C14 | Fitur belum selesai | Intent `QUERY` (`/saldo`) dan `CORRECT` dibalas "belum tersedia" | `whatsapp.conversation.ts` | Sesuai Phase 2 |
 | C15 | Endpoint belum lengkap | Tidak ada cara membaca transaksi yang sudah dihapus; restore hanya bisa dengan id yang masih disimpan klien | `transactions.repository.list` selalu `deleted_at IS NULL` | Dicatat juga di `API.md` B12 |
-| C16 | Endpoint belum lengkap | Tidak ada endpoint pembaca `audit_logs`; audit hanya untuk transaksi (penautan WhatsApp tidak diaudit) | — | |
+| C16 | Fitur belum selesai | Audit penautan WhatsApp tidak ditulis (`entity_type = whatsapp_account` tidak pernah ditulis); pembaca `GET /audit-logs` sudah tersedia untuk transaksi dan anggaran | `whatsapp.repository.ts` tidak menulis `audit_logs` | Perubahan tautan tidak dapat ditelusuri lewat audit. Bagian B Tahap 5 tidak dikerjakan karena Q11 memilih opsi B |
 | C17 | Data model | `users.timezone`, `users.locale`, `users.currency`, `transactions.receipt_url`, `whatsapp_sessions.phone_e164` tidak pernah dipakai/diisi kode; zona waktu dikunci di `timezone.ts` | `grep` | Kolom menyesatkan bila klien mengubah zona |
 | C18 | Inkonsistensi | `GET /dashboard` dapat menghasilkan 404 (profil tidak ada) yang tidak tercantum di OpenAPI | `dashboard.openapi.ts` | Kontrak tidak lengkap |
 | C19 | Inkonsistensi | `README.md` mendokumentasikan `TEST_REDIS_URL`, tetapi `.env.example` tidak memuatnya | Kedua berkas | Minor |
 | C20 | Konvensi | Pola "enam berkas per modul" tidak dipenuhi `dashboard` (tanpa repository) dan `webhooks` (tanpa service), sementara `transactions` dan `whatsapp` punya berkas tambahan | Daftar berkas | Disengaja dan dijelaskan di komentar; perlu disebut di dokumen struktur |
-| C21 | Test | 375 test (integrasi + Redis) dilewati otomatis bila Docker tidak menyala; `npm run test` tetap lulus | Output test | Regresi integrasi bisa lolos tanpa disadari |
-| C22 | Fitur | Folder modul `audit-logs`, `budgets`, `notifications`, `reports` kosong | Daftar berkas | Sesuai `LOCAL-MODE.md` |
+| C21 | Test | Test integrasi + Redis dilewati otomatis bila Docker tidak menyala; `npm run test` tetap lulus | Output test | Regresi integrasi bisa lolos tanpa disadari |
+
+**C13 ditutup di Tahap 4.** Job `daily-summary` membaca `whatsapp_accounts.daily_summary_enabled` dan job `budget-alert` membaca `budget_alert_enabled`; `renew-budgets` menjalankan `budgets.auto_renew`. Ketiga job terdaftar di antrean `scheduled` oleh `src/worker.ts` dan idempoten terhadap retry/eksekusi paralel.
+
+**C22 ditutup di Tahap 5.** Folder `src/modules/audit-logs/` kini berisi modul pembaca `GET /audit-logs`; `notifications` sudah diimplementasikan di Phase 2.
+
+**Catatan audit Tahap 6.** Tidak ada temuan baru di `reports`, `budgets`, `notifications`, `audit-logs`, maupun `transactions.summary.ts`. Dua adapter job sengaja membaca lintas pengguna dan tidak pernah diekspos HTTP: `budgets.repository.listDueRenewals` (mencari semua anggaran yang perlu diperpanjang) dan audiens `whatsapp_accounts` di `workers/scheduled.ports.ts` (paginasi + filter preferensi/`userDeletedAt` di service). Keduanya tetap memfilter `deleted_at` atau status akun. Tidak ada nomor telepon, OTP, atau isi pesan WhatsApp di log, `notifications.payload`, atau `audit_logs.changes`; allowlist `audit-logs.changes.ts` membuang kunci lain.
 
 ### 13.2 Potential issues (perlu diperiksa lebih lanjut)
 
@@ -2785,6 +3487,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | P11 | Antrean dari proses API | `getQueues()` membuka koneksi BullMQ bersama; `closeSharedQueues()` ada tetapi tidak dipanggil di mana pun, dan `server.ts` tidak punya penanganan shutdown | Potential (kebersihan shutdown) |
 | P12 | Ajakan daftar ke LID | Bila `sender.phoneNumber` tidak ada, ajakan dikirim ke LID; apakah OpenWA dapat mengirim ke LID belum diverifikasi | Needs Verification |
 | P13 | Onboarding tidak membedakan "Selesai" dan "Lewati" | `POST /me/onboarding/complete` hanya mengisi satu timestamp. Pengguna yang melewati onboarding tanpa mengisi saldo awal atau menautkan WhatsApp tidak dapat dibedakan dari yang menyelesaikannya. Membedakannya butuh kolom tambahan lewat `prisma migrate` | Potential |
+| P14 | Anggaran demo tanpa kategori warning pada tanggal 1 | Seed menghitung alokasi dari pengeluaran bulan berjalan. Bila seed dijalankan pada tanggal 1 sebelum ada transaksi pengeluaran, semua kategori berstatus `ok`; tidak ada yang bisa didemokan sebagai warning | Dikenal (batas data demo) |
 
 ### 13.3 Duplikasi dan kandidat refactor
 
@@ -2812,7 +3515,7 @@ Monolit modular dua proses yang berjalan sepenuhnya di mesin lokal; mobile digan
 | Webhook | Rahasia ≥ 16 karakter, perbandingan SHA-256 + `timingSafeEqual`, body tidak dibaca sebelum rahasia cocok, idempotency DB membuat replay tanpa efek, bind `127.0.0.1` |
 | OTP | CSPRNG, hash bcrypt, berlaku 10 menit, 5 percobaan atomik, kuota harian per nomor dan per pengguna, kode lama dibatalkan saat permintaan baru |
 | Privasi | Nomor disamarkan di respons (`+6281234xxxx9`) dan log (`628xxxxxx789`); isi pesan/OTP tidak di log; `raw_payload` dilindungi RLS tanpa policy |
-| LLM | Kontrak struktural tanpa `amount`/`date`; balasan dari template (prompt injection paling jauh mengubah kategori) — saat ini LLM tidak aktif sama sekali |
+| LLM | Kontrak klasifikasi tanpa `amount`/`date`; nominal dan tanggal selalu dari regex; `safeClassify` timeout 3s + confidence ≥ 0.7. Balasan template secara bawaan (`LLM_REPLY_MODE=template`); mode `freeform` hanya untuk UNKNOWN/QUERY/CORRECT tanpa pending, dengan prompt terbatas, guard uang/panjang, dan fallback template. `LLM_PROVIDER=disabled` bawaan (tanpa jaringan) |
 | Penyalahgunaan | Rate limit global/login/register/transaksi/webhook; ajakan daftar 1×/24 jam per nomor; outbound concurrency 1 + jeda acak |
 | Rahasia | Semua lewat env, divalidasi saat boot; `.env`, `_IGNORE_*` (sesi OpenWA), `session.data.json` di `.gitignore` |
 | Error | Pesan internal tidak bocor; alasan kegagalan JWT tidak dibedakan |
@@ -2856,8 +3559,11 @@ Divalidasi di `src/config/env.ts`. Nilai tidak dicantumkan di sini.
 | `OPENWA_API_KEY` | Ya | — | Header `api_key` (rahasia) |
 | `OPENWA_SESSION_ID` | Tidak | `myfinance-bot` | Baris `whatsapp_sessions` |
 | `WEBHOOK_SECRET` | Ya, `[A-Za-z0-9_-]{16,}` | — | Segmen path webhook (rahasia) |
-| `LLM_PROVIDER` | Tidak | `disabled` (satu-satunya nilai) | Tidak dipakai kode |
-| `LLM_API_KEY` | Tidak | — | Tidak dipakai kode |
+| `LLM_PROVIDER` | Tidak | `disabled` (`disabled` \| `groq`) | Worker: klasifikasi kategori/intent dan (bila `freeform`) jawaban bebas |
+| `LLM_API_KEY` | Tidak (wajib bila provider `groq`) | — | Worker: kunci API Groq |
+| `LLM_BASE_URL` | Tidak | `https://api.groq.com/openai/v1` | Worker: endpoint Groq |
+| `LLM_MODEL` | Tidak | `qwen/qwen3.8-27b` | Worker: model Groq |
+| `LLM_REPLY_MODE` | Tidak | `template` (`template` \| `freeform`) | Worker: sumber teks balasan; `freeform` hanya untuk pesan non-deterministik |
 
 Hanya dibaca di luar `env.ts`: `TEST_DATABASE_URL`, `TEST_REDIS_URL` (test), `DEMO_EMAIL`, `DEMO_PASSWORD` (seed). Seed memvalidasi variabelnya sendiri (Supabase + `REDIS_URL`), tidak memakai `env.ts`.
 
@@ -2894,7 +3600,7 @@ OpenWA dijalankan dari `spike/` dengan tambalan user agent; perintah lengkap di 
 | Integrasi (auth, transaksi, dashboard, users/accounts/categories, webhook, WhatsApp, percakapan, seed) | `tests/integration/` | `docker compose up -d postgres-test` |
 | Redis (lock, pending state, antrean) | `tests/integration/` | `docker compose up -d redis` |
 
-Vitest berjalan dengan `fileParallelism: false` karena test integrasi berbagi satu database. `global-setup.ts` menyiapkan Postgres test bila menyala; test yang butuh Docker dilewati dengan pesan bila tidak. Hasil saat audit (tanpa Docker): 1.316 lulus, 375 dilewati.
+Vitest berjalan dengan `fileParallelism: false` karena test integrasi berbagi satu database. `global-setup.ts` menyiapkan Postgres test bila menyala; test yang butuh Docker dilewati dengan pesan bila tidak. Hasil terakhir dengan `postgres-test` + Redis menyala: **2.039 lulus, 0 dilewati, 62 berkas**; tanpa Docker, suite integrasi/Redis dilewati dan test unit tetap lulus.
 
 ### 15.5 Verifikasi manual
 
@@ -2905,6 +3611,8 @@ Vitest berjalan dengan `fileParallelism: false` karena test integrasi berbagi sa
 | Swagger UI | `http://127.0.0.1:3000/api-docs` |
 | Skenario demo | `claude/DEMO-SCRIPT.md` |
 | Data | `npx prisma studio` (termasuk `audit_logs`) |
+
+`audit_logs` juga bisa dibaca lewat `GET /audit-logs` (koleksi `rest/audit-logs.http`). `prisma studio` tetap tersedia untuk inspeksi langsung, termasuk kolom `user_id` dan `ip_address` yang tidak ditampilkan API.
 
 Kredensial pengguna demo tercantum di `README.md`; tidak diulang di sini.
 
@@ -2930,21 +3638,22 @@ Diurutkan dari dampak terbesar terhadap kebenaran dan keamanan.
 7. **Polling sesi berkala** dari worker yang memperbarui `whatsapp_sessions`.
 8. **Job retensi** `raw_payload` 30 hari (BullMQ repeatable job atau `pg_cron`).
 9. **Alirkan `correlation_id`** ke log worker dan tambahkan access log HTTP dengan penyamaran.
-10. **Rakit `LlmGateway`** di pipeline lewat `safeClassify` (tetap `DisabledLlmGateway` secara bawaan), supaya klaim "cukup ganti implementasi" benar.
+10. ~~Rakit `LlmGateway`~~ ✅ **DONE** — `createLlmGateway()` dirakit di `pipeline.ts` lewat `safeClassify`, default `DisabledLlmGateway`; `groq.gateway.ts` implementasi OpenAI-compatible ke Groq; `whatsapp.conversation.ts` port `ConversationLlm` untuk cadangan kategori/intent.
 11. **Rate limiter berbasis Redis** (antarmuka `RateLimitStore` sudah ada).
-12. **Fitur Phase 2:** query saldo/periode lewat WhatsApp, koreksi transaksi, ringkasan harian dan peringatan anggaran (memakai sakelar preferensi yang sudah ada), anggaran, laporan, kategori kustom, multi-dompet.
+12. **Fitur Phase 2 tersisa:** query saldo/periode lewat WhatsApp, koreksi transaksi, kategori kustom, multi-dompet.
 13. **Daftar transaksi terhapus** (`GET /transactions?deleted=true`) bila fitur "sampah" diperlukan.
 14. **Catat pesan outbound** di `message_logs` (`direction = outbound`) untuk jejak percakapan lengkap.
 15. **Rapikan duplikasi** di Bagian 13.3 dan perbarui `API.md`/`CLAUDE.md` sesuai temuan C11, C12.
-16. **Jalankan test integrasi di CI** dengan Postgres dan Redis supaya 375 test tidak terlewat diam-diam.
+16. **Jalankan test integrasi di CI** dengan Postgres dan Redis supaya test integrasi tidak terlewat diam-diam saat Docker tidak tersedia.
 17. **`ecosystem.config.js`** untuk menjalankan API + worker bersama, bila tetap diinginkan.
+18. **Transaksi awal bulan pada seed demo** agar anggaran selalu punya kategori warning bila seed dijalankan pada tanggal 1 sebelum ada pengeluaran — P14.
 
 ---
 
 ## 17. Conclusion
 
-Backend Cashify saat ini adalah implementasi lengkap dari cakupan yang ditetapkan `LOCAL-MODE.md` dan `API.md`: **25 endpoint kontrak + `/health` terpasang**, ditambah `POST /me/onboarding/complete`, Swagger, penerima webhook OpenWA v4 yang idempoten, worker dua antrean dengan pembatasan laju kirim, pipeline parser regex yang murni dan teruji, dan alur percakapan WhatsApp dengan konfirmasi, klarifikasi, dan hapus transaksi terakhir.
+Backend Cashify saat ini adalah implementasi lengkap dari cakupan yang ditetapkan `LOCAL-MODE.md` dan `API.md`: **25 endpoint kontrak + `/health` terpasang**, ditambah `POST /me/onboarding/complete`, dua endpoint laporan Phase 2 (`/reports/monthly`, `/reports/trend`), enam endpoint anggaran, dua endpoint notifikasi, satu endpoint pembaca audit (`GET /audit-logs`), Swagger, penerima webhook OpenWA v4 yang idempoten, worker tiga antrean (`inbound`, `outbound`, `scheduled`) dengan pembatasan laju kirim dan tiga job terjadwal, pipeline parser regex yang murni dan teruji, dan alur percakapan WhatsApp dengan konfirmasi, klarifikasi, dan hapus transaksi terakhir. Seed demo kini juga membuat satu anggaran bulan berjalan (3-4 kategori, satu `warning`) dan tiga baris riwayat notifikasi (`sent`, `failed`, `read`) sehingga fitur Phase 2 bisa didemokan tanpa menunggu job.
 
-Prinsip inti rancangan ditegakkan di kode dan sebagian besar dijaga test: uang sebagai bilangan bulat, nominal dan tanggal dari regex, balasan dari template, webhook tanpa service dengan idempotency di database, `user_id` hanya dari JWT dengan penjaga di repository, soft delete, dan antrean `outbound` concurrency 1 dengan jeda acak.
+Prinsip inti rancangan ditegakkan di kode dan sebagian besar dijaga test: uang sebagai bilangan bulat, nominal dan tanggal dari regex, balasan dari template (kecuali mode `freeform` opt-in untuk pesan non-deterministik, 10.5), webhook tanpa service dengan idempotency di database, `user_id` hanya dari JWT dengan penjaga di repository, soft delete, dan antrean `outbound` concurrency 1 dengan jeda acak.
 
-Penyimpangan terbesar dari blueprint bersifat sadar dan terdokumentasi: tanpa infrastruktur produksi, Supabase Auth penuh, LLM dimatikan, webhook disesuaikan dengan perilaku nyata OpenWA v4, dan fitur Phase 2 hanya berupa tabel. Yang belum terdokumentasi dan perlu ditangani lebih dulu adalah tiga temuan keamanan/perilaku pada autentikasi dan logging (C2, C3, C4), satu potensi rekursi tanpa batas (P1), dan asumsi API OpenWA yang belum direkam (P2). Selain itu, `LlmGateway` perlu dirakit bila klaim "cukup ganti implementasi" ingin dipertahankan.
+Penyimpangan terbesar dari blueprint bersifat sadar dan terdokumentasi: tanpa infrastruktur produksi, Supabase Auth penuh, webhook disesuaikan dengan perilaku nyata OpenWA v4, dan seluruh fitur Phase 2 sudah diimplementasikan (reports, budgets, notifications, audit-logs); audit penautan WhatsApp tetap tidak dikerjakan (C16). **LLM kini dirakit** (`groq.gateway.ts` + `pipeline.ts` + `ConversationLlm` port), default tetap `DisabledLlmGateway` (`LLM_PROVIDER=disabled`) dan balasan template (`LLM_REPLY_MODE=template`); aktifkan dengan `LLM_PROVIDER=groq` dan `LLM_API_KEY`, lalu `LLM_REPLY_MODE=freeform` bila jawaban bebas diinginkan (penyimpangan opt-in dari aturan 3, lihat 10.5). Audit Tahap 6 tidak menemukan kueri data pengguna tanpa filter `user_id`/`deleted_at` yang dapat diakses HTTP, PII baru di log/payload/`changes`, atau perhitungan tanggal di luar `timezone.ts`; dua adapter job yang membaca lintas pengguna bersifat sengaja dan tidak diekspos HTTP. Yang belum terdokumentasi dan perlu ditangani lebih dulu adalah tiga temuan keamanan/perilaku pada autentikasi dan logging (C2, C3, C4), satu potensi rekursi tanpa batas (P1), dan asumsi API OpenWA yang belum direkam (P2). Temuan C1 (`LlmGateway` tidak dirakit) **resolved**; C13 (sakelar preferensi tidak dibaca) **resolved** oleh job terjadwal Tahap 4; C22 (folder `audit-logs` kosong) **resolved** oleh Tahap 5.
