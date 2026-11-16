@@ -18,6 +18,7 @@
 // Pengiriman yang sudah selesai tidak terpengaruh; yang dibatalkan hanya jedanya.
 
 import { DelayedError, UnrecoverableError, Worker, type ConnectionOptions, type Job } from 'bullmq';
+import { z } from 'zod';
 import { logger } from '../config/logger.js';
 import type { QueueFactoryOptions } from '../queues/inbound.queue.js';
 import {
@@ -27,6 +28,7 @@ import {
   randomDelayMs,
   type OutboundJobData,
 } from '../queues/outbound.queue.js';
+import type { NotificationFailureReason, NotificationStatusPort } from '../modules/notifications/notifications.types.js';
 import { maskPhoneForLog } from '../shared/utils/phone.js';
 import { isFinalFailure } from './inbound.worker.js';
 
@@ -52,6 +54,11 @@ export interface OutboundWorkerOptions extends QueueFactoryOptions {
    * Galat di dalamnya hanya dicatat.
    */
   onExhausted?: (data: OutboundJobData, error: Error) => Promise<void>;
+  /**
+   * Status notifikasi otomatis (port dari modul notifications, dirakit di pipeline.ts).
+   * Tanpa ini, job OTP dan balasan bot berjalan persis seperti sebelumnya.
+   */
+  notifications?: NotificationStatusPort;
   /** Penyuntik jam untuk test. */
   now?: () => number;
 }
@@ -89,10 +96,24 @@ export function createOutboundWorker(
     disconnectedDelayMs = DISCONNECTED_RETRY_DELAY_MS,
     maxAgeMs = MAX_JOB_AGE_MS,
     onExhausted,
+    notifications,
     now = Date.now,
   }: OutboundWorkerOptions = {},
 ): Worker<OutboundJobData> {
   const closing = new AbortController();
+
+  /**
+   * Pesan sudah benar-benar terkirim. Kegagalan menandai status TIDAK boleh dilempar: BullMQ akan
+   * menganggap job gagal lalu mengirim ulang pesannya (duplikat). Cukup dicatat di log.
+   */
+  const markSent = async (data: OutboundJobData): Promise<void> => {
+    if (!notifications || !data.notification_id) return;
+    try {
+      await notifications.markSent(data.notification_id);
+    } catch (err) {
+      logger.error({ err, notificationId: data.notification_id }, 'Gagal menandai notifikasi terkirim');
+    }
+  };
 
   const worker = new Worker<OutboundJobData>(
     OUTBOUND_QUEUE,
@@ -111,6 +132,7 @@ export function createOutboundWorker(
       }
       try {
         await send(parsed.data, job);
+        await markSent(parsed.data);
       } finally {
         await pause(closing.signal);
       }
@@ -123,7 +145,21 @@ export function createOutboundWorker(
   worker.on('error', (err) => logger.error({ err, queue: OUTBOUND_QUEUE }, 'Kesalahan worker'));
   worker.on('failed', (job, err) => {
     logger.warn({ err, queue: OUTBOUND_QUEUE, jobId: job?.id, attemptsMade: job?.attemptsMade }, 'Job gagal');
-    if (!onExhausted || !isFinalFailure(job, err)) return;
+    if (!isFinalFailure(job, err)) return;
+
+    // Notifikasi tidak boleh menggantung di `pending`: percobaan habis, data rusak, atau job
+    // kedaluwarsa semuanya berarti pesan ini tidak akan dikirim lagi.
+    const notificationId = z.uuid().safeParse(job?.data?.notification_id);
+    if (notifications && notificationId.success) {
+      notifications.markFailed(notificationId.data, failureReasonOf(job, err)).catch((cause: unknown) =>
+        logger.error(
+          { err: cause, jobId: job?.id, notificationId: notificationId.data },
+          'Gagal menandai notifikasi gagal terkirim',
+        ),
+      );
+    }
+
+    if (!onExhausted) return;
     const parsed = outboundJobSchema.safeParse(job?.data);
     if (!parsed.success) return;
     onExhausted(parsed.data, err).catch((cause: unknown) =>
@@ -131,4 +167,11 @@ export function createOutboundWorker(
     );
   });
   return worker;
+}
+
+/** Alasan kegagalan untuk log: kode tertutup, bukan pesan galat gateway. */
+function failureReasonOf(job: Job<OutboundJobData> | undefined, error: Error): NotificationFailureReason {
+  if (!(error instanceof UnrecoverableError)) return 'send_failed';
+  // Hanya dua jalur UnrecoverableError di atas: data job rusak, atau job terlalu tua.
+  return outboundJobSchema.safeParse(job?.data).success ? 'expired' : 'invalid_job';
 }

@@ -23,11 +23,16 @@ export function randomDelayMs(rng: () => number = Math.random): number {
   return OUTBOUND_DELAY_MIN_MS + Math.floor(rng() * (OUTBOUND_DELAY_MAX_MS - OUTBOUND_DELAY_MIN_MS + 1));
 }
 
-/** `wa_chat_id` dan `text` diteruskan apa adanya ke `WhatsAppGateway.sendText(to, body)`. */
+/**
+ * `wa_chat_id` dan `text` diteruskan apa adanya ke `WhatsAppGateway.sendText(to, body)`.
+ * `notification_id` opsional: hanya pesan otomatis (ringkasan/peringatan) yang punya baris
+ * `notifications`; OTP dan balasan bot berjalan persis seperti sebelumnya tanpa field ini.
+ */
 export const outboundJobSchema = z.object({
   wa_chat_id: z.string().min(1).max(64),
   text: z.string().min(1),
   message_log_id: z.uuid().optional(),
+  notification_id: z.uuid().optional(),
 });
 export type OutboundJobData = z.infer<typeof outboundJobSchema>;
 
@@ -53,15 +58,24 @@ export function createOutboundQueue(
 export interface EnqueueOutboundOptions {
   /**
    * Kunci dedupe: job dengan `jobId` yang sama tidak dimasukkan dua kali. Balasan atas sebuah pesan
-   * memakai ini supaya job inbound yang diulang tidak menggandakan balasan. Tanpa ':' (BullMQ menolaknya).
+   * memakai ini supaya job inbound yang diulang tidak menggandakan balasan.
+   *
+   * BullMQ 6 menolak jobId dengan ':' kecuali tepat tiga segmen. Job terjadwal memakai bentuk
+   * `daily:{user_id}:{tanggal}` dan `alert:{budget_category_id}:{periode}` (tiga segmen); id
+   * balasan tetap memakai tanda hubung.
    */
   jobId?: string;
+  /** Jitter ringkasan harian (0-30 menit); job tetap dibatalkan worker bila lebih tua dari 1 jam. */
+  delay?: number;
 }
 
 export async function enqueueOutbound(
   queue: Queue<OutboundJobData>,
   data: OutboundJobData,
-  { jobId }: EnqueueOutboundOptions = {},
+  { jobId, delay }: EnqueueOutboundOptions = {},
 ) {
-  return queue.add('send-message', outboundJobSchema.parse(data), jobId ? { jobId } : {});
+  return queue.add('send-message', outboundJobSchema.parse(data), {
+    ...(jobId ? { jobId } : {}),
+    ...(delay !== undefined ? { delay } : {}),
+  });
 }

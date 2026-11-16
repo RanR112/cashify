@@ -1,0 +1,79 @@
+# Koleksi REST — Notifikasi
+#
+# Salin session.access_token dari respons login (auth.http) ke @token.
+#
+# Tidak ada endpoint HTTP yang MEMBUAT notifikasi: baris `pending` dibuat oleh job terjadwal
+# (`daily-summary` / `budget-alert` di antrean `scheduled`), lalu statusnya diperbarui worker
+# outbound. Untuk mencoba koleksi ini, nyalakan sakelar preferensi WhatsApp Anda
+# (`PATCH /whatsapp/preferences`), jalankan `npm run dev:worker`, dan tunggu jadwal
+# (ringkasan 20.00 WIB; peringatan anggaran tiap 15 menit antara 07.00-22.00 WIB).
+#
+# Alternatif tanpa menunggu jadwal: buat satu baris manual lewat `npx prisma studio`:
+#
+#   notifications: user_id = id pengguna Anda, type = daily_summary,
+#   channel = whatsapp, title = "Ringkasan harian", body = "Masuk: Rp0",
+#   payload = {"date":"2026-10-05"}, status = pending
+#
+# Setelah worker mengirimkannya, status menjadi `sent` dan PATCH read bisa dipakai.
+#
+# Arti status: pending = belum terkirim, sent = sudah dikirim, failed = percobaan habis /
+# kedaluwarsa, read = sudah dilihat di aplikasi (bukan bukti dibaca di WhatsApp).
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+@notificationId = GANTI_DENGAN_ID_NOTIFIKASI_MILIK_ANDA
+
+### ============================================================
+### GET /notifications
+### ============================================================
+
+# Sukses: 200 { data: [...], next_cursor, has_more }, terbaru dulu.
+# `payload` tidak pernah ditampilkan.
+GET {{baseUrl}}/notifications
+Authorization: Bearer {{token}}
+
+### Filter status (pending | sent | failed | read)
+GET {{baseUrl}}/notifications?status=sent
+Authorization: Bearer {{token}}
+
+### Halaman berikutnya: salin next_cursor dari respons sebelumnya
+GET {{baseUrl}}/notifications?limit=5&cursor=GANTI_DENGAN_NEXT_CURSOR
+Authorization: Bearer {{token}}
+
+### Error 400: status di luar daftar
+GET {{baseUrl}}/notifications?status=terkirim
+Authorization: Bearer {{token}}
+
+### Error 400: cursor rusak
+GET {{baseUrl}}/notifications?cursor=bukan-cursor
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/notifications
+
+### ============================================================
+### PATCH /notifications/{id}/read
+### ============================================================
+
+# Sukses: 200 Notification dengan status "read"; sent_at dipertahankan.
+PATCH {{baseUrl}}/notifications/{{notificationId}}/read
+Authorization: Bearer {{token}}
+
+### Idempoten: kirim ulang, tetap 200 dengan status "read"
+PATCH {{baseUrl}}/notifications/{{notificationId}}/read
+Authorization: Bearer {{token}}
+
+### Error 409 CONFLICT: baris masih pending (belum terkirim) atau failed
+PATCH {{baseUrl}}/notifications/{{notificationId}}/read
+Authorization: Bearer {{token}}
+
+### Error 404: id milik pengguna lain atau tidak ada
+PATCH {{baseUrl}}/notifications/00000000-0000-4000-8000-000000000000/read
+Authorization: Bearer {{token}}
+
+### Error 400: id bukan UUID
+PATCH {{baseUrl}}/notifications/bukan-uuid/read
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+PATCH {{baseUrl}}/notifications/{{notificationId}}/read
