@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { SYSTEM_CATEGORIES } from '../../prisma/seed-data.js';
 import {
+  buildDemoBudget,
   buildDemoDataset,
+  buildDemoNotifications,
   DEMO_ACCOUNTS,
   DEMO_SALARY_AMOUNT,
   DEMO_SALARY_DAY,
   demoMonths,
   demoWindowStart,
   formatAmountForChat,
+  type DemoCategorySpend,
   type DemoTransactionSpec,
 } from '../../prisma/seed-demo-data.js';
 import { addDays, isValidDateString, jakartaDayStartUtc } from '../../src/shared/utils/timezone.js';
@@ -204,5 +207,145 @@ describe('buildDemoDataset', () => {
         expect(t.minuteOfDay).toBeLessThan(24 * 60);
       }
     });
+  });
+});
+
+describe('anggaran demo', () => {
+  const today = '2026-10-03';
+  const currentMonth: DemoCategorySpend[] = [
+    { categoryId: 'food', name: 'Makanan', slug: 'food', total: 900_000 },
+    { categoryId: 'transport', name: 'Transportasi', slug: 'transport', total: 300_000 },
+  ];
+  const recent: DemoCategorySpend[] = [
+    ...currentMonth,
+    { categoryId: 'bills', name: 'Tagihan', slug: 'bills', total: 800_000 },
+    { categoryId: 'shopping', name: 'Belanja', slug: 'shopping', total: 600_000 },
+  ];
+
+  it('3-4 kategori, periode bulan berjalan, dan tepat satu kategori warning', () => {
+    const budget = buildDemoBudget(today, { currentMonth, recent });
+    expect(budget).not.toBeNull();
+    if (!budget) return;
+
+    expect(budget.periodStart).toBe('2026-10-01');
+    expect(budget.periodEnd).toBe('2026-10-31');
+    expect(budget.name).toBe('Anggaran Oktober 2026');
+    expect(budget.categories.length).toBeGreaterThanOrEqual(3);
+    expect(budget.categories.length).toBeLessThanOrEqual(4);
+    expect(budget.totalAmount).toBeGreaterThanOrEqual(
+      budget.categories.reduce((sum, category) => sum + category.amount, 0),
+    );
+    expect(budget.alertCategoryId).toBe('food');
+    expect(budget.alertSpent).toBe(900_000);
+
+    const percents = budget.categories.map((category) => {
+      const spent = category.categoryId === 'food' ? 900_000 : category.categoryId === 'transport' ? 300_000 : 0;
+      return (spent / category.amount) * 100;
+    });
+    const warnings = percents.filter((percent) => percent >= 80 && percent <= 100);
+    expect(warnings).toHaveLength(1);
+    expect(percents.filter((percent) => percent > 100)).toHaveLength(0);
+    expect(budget.categories.every((category) => category.alertThreshold === 80)).toBe(true);
+  });
+
+  it('tanpa pengeluaran bulan berjalan: kategori dari 60 hari terakhir, tanpa warning', () => {
+    const budget = buildDemoBudget(today, { currentMonth: [], recent });
+    expect(budget).not.toBeNull();
+    if (!budget) return;
+
+    expect(budget.alertCategoryId).toBeNull();
+    expect(budget.alertSpent).toBe(0);
+    expect(budget.categories.length).toBe(4);
+    expect(budget.categories.every((category) => category.amount === 100_000)).toBe(true);
+  });
+
+  it('tanpa kategori sama sekali menghasilkan null', () => {
+    expect(buildDemoBudget(today, { currentMonth: [], recent: [] })).toBeNull();
+  });
+
+  it('deterministik untuk tanggal dan data yang sama', () => {
+    expect(buildDemoBudget(today, { currentMonth, recent })).toEqual(
+      buildDemoBudget(today, { currentMonth, recent }),
+    );
+  });
+});
+
+describe('notifikasi demo', () => {
+  const today = '2026-10-03';
+  const currentMonth: DemoCategorySpend[] = [
+    { categoryId: 'food', name: 'Makanan', slug: 'food', total: 900_000 },
+  ];
+  const recent: DemoCategorySpend[] = [
+    ...currentMonth,
+    { categoryId: 'transport', name: 'Transportasi', slug: 'transport', total: 300_000 },
+    { categoryId: 'bills', name: 'Tagihan', slug: 'bills', total: 800_000 },
+  ];
+  const budget = buildDemoBudget(today, { currentMonth, recent });
+  const dailyStats = [
+    {
+      date: '2026-10-02',
+      income: 0,
+      expense: 75_000,
+      topExpenseCategory: { name: 'Makanan', total: 50_000 },
+    },
+    {
+      date: '2026-10-01',
+      income: DEMO_SALARY_AMOUNT,
+      expense: 120_000,
+      topExpenseCategory: null,
+    },
+  ];
+
+  it('menghasilkan sent, failed, dan read dengan tanggal lampau', () => {
+    const specs = buildDemoNotifications(today, { dailyStats, budget, budgetId: 'budget-1' });
+    expect(specs.map((spec) => spec.status)).toEqual(expect.arrayContaining(['sent', 'failed', 'read']));
+    expect(specs).toHaveLength(3);
+
+    const sent = specs.find((spec) => spec.status === 'sent');
+    const failed = specs.find((spec) => spec.status === 'failed');
+    const read = specs.find((spec) => spec.status === 'read');
+
+    expect(sent?.payload).toEqual({ date: '2026-10-02' });
+    expect(sent?.sentAt).not.toBeNull();
+    expect(sent?.body).toContain('Ringkasan 2 Okt');
+    expect(failed?.payload).toEqual({ date: '2026-10-01' });
+    expect(failed?.sentAt).toBeNull();
+    expect(failed?.body).toContain('Ringkasan 1 Okt');
+    expect(read?.payload).toEqual({ budget_id: 'budget-1', category_id: 'food' });
+    expect(read?.body).toContain('Anggaran Makanan');
+    expect(read?.sentAt).not.toBeNull();
+    expect(read?.scheduledFor).toBeNull();
+
+    for (const spec of specs) {
+      expect(spec.createdAt.getTime()).toBeLessThan(jakartaDayStartUtc(today).getTime());
+      expect(spec.body.length).toBeLessThan(600);
+      expect(spec.title.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('mengabaikan tanggal hari ini dan masa depan', () => {
+    const specs = buildDemoNotifications(today, {
+      dailyStats: [
+        { date: today, income: 1000, expense: 0, topExpenseCategory: null },
+        ...dailyStats,
+      ],
+      budget,
+      budgetId: 'budget-1',
+    });
+    expect(specs.filter((spec) => spec.type === 'daily_summary').map((spec) => spec.payload)).toEqual([
+      { date: '2026-10-02' },
+      { date: '2026-10-01' },
+    ]);
+  });
+
+  it('tanpa anggaran warning tidak membuat baris budget_alert', () => {
+    const specs = buildDemoNotifications(today, { dailyStats, budget: null, budgetId: null });
+    expect(specs.map((spec) => spec.type)).toEqual(['daily_summary', 'daily_summary']);
+  });
+
+  it('deterministik untuk tanggal dan data yang sama', () => {
+    expect(buildDemoNotifications(today, { dailyStats, budget, budgetId: 'budget-1' })).toEqual(
+      buildDemoNotifications(today, { dailyStats, budget, budgetId: 'budget-1' }),
+    );
   });
 });

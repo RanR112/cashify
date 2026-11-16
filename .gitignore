@@ -14,5 +14,5 @@ logs/*
 _IGNORE_*
 commits/
 claude/
-CLAUDE.md
-PROMPTS*.md
+*.md
+!README.md

@@ -104,10 +104,14 @@ async function seedDemoUser(reset: boolean): Promise<void> {
     );
   }
 
+  const budgetNote = result.budgetCreated ? '1 anggaran bulan berjalan dibuat' : 'anggaran sudah ada';
+  const notificationNote = `${result.notificationsCreated} notifikasi baru`;
+
   if (result.seededTransactions) {
     console.log(
       `Seed demo selesai untuk ${env.DEMO_EMAIL}: ${result.transactions} transaksi ` +
-        `(${result.deletedTransactions} di-soft-delete), ${result.whatsappMessages} pesan WhatsApp.`,
+        `(${result.deletedTransactions} di-soft-delete), ${result.whatsappMessages} pesan WhatsApp, ` +
+        `${budgetNote}, ${notificationNote}.`,
     );
     console.log(
       [
@@ -116,13 +120,16 @@ async function seedDemoUser(reset: boolean): Promise<void> {
         `  email     ${env.DEMO_EMAIL}`,
         `  password  ${env.DEMO_PASSWORD}`,
         '  langkah   POST /auth/login -> GET /dashboard (rest/auth.http, rest/dashboard.http)',
+        '  anggaran  GET /budgets/current (rest/budgets.http)',
+        '  laporan   GET /reports/monthly (rest/reports.http)',
+        '  riwayat   GET /notifications (rest/notifications.http)',
         '  WhatsApp  belum tertaut; lanjut ke claude/DEMO-SCRIPT.md',
       ].join('\n'),
     );
   } else {
     console.log(
-      `Pengguna demo ${env.DEMO_EMAIL} sudah punya ${result.existingTransactions} transaksi; dilewati. ` +
-        'Pakai `npm run seed:reset` untuk membuat ulang dengan tanggal terbaru.',
+      `Pengguna demo ${env.DEMO_EMAIL} sudah punya ${result.existingTransactions} transaksi; transaksi dilewati ` +
+        `(${budgetNote}, ${notificationNote}). Pakai \`npm run seed:reset\` untuk membuat ulang dengan tanggal terbaru.`,
     );
   }
 }

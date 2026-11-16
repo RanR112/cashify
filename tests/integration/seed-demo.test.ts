@@ -51,6 +51,13 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
     accounts: await prisma.account.count({ where: { userId, deletedAt: null } }),
   });
 
+  const extras = async (userId: string) => ({
+    budgets: await prisma.budget.count({ where: { userId, deletedAt: null } }),
+    budgetCategories: await prisma.budgetCategory.count({ where: { budget: { userId } } }),
+    notifications: await prisma.notification.count({ where: { userId } }),
+    budgetAudits: await prisma.auditLog.count({ where: { userId, entityType: 'budget' } }),
+  });
+
   const expectedDeleted = dataset.transactions.filter((t) => t.deletedAt).length;
   const expectedMessages = dataset.transactions.filter((t) => t.source === 'whatsapp').length;
 
@@ -63,9 +70,37 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
       transactions: dataset.transactions.length,
       deleted: expectedDeleted,
       messages: expectedMessages,
-      audits: dataset.transactions.length + expectedDeleted,
+      audits: dataset.transactions.length + expectedDeleted + 1,
       accounts: 2,
     });
+
+    // Anggaran bulan berjalan: 3-4 kategori, tepat satu yang melewati ambang.
+    expect(result.budgetCreated).toBe(true);
+    expect(result.notificationsCreated).toBe(3);
+    const budget = await prisma.budget.findFirstOrThrow({
+      where: { userId: result.userId, deletedAt: null },
+      include: { budgetCategories: true },
+    });
+    expect(budget.periodStart.toISOString().slice(0, 10)).toBe('2026-10-01');
+    expect(budget.periodEnd.toISOString().slice(0, 10)).toBe('2026-10-31');
+    expect(budget.budgetCategories.length).toBeGreaterThanOrEqual(3);
+    expect(budget.budgetCategories.length).toBeLessThanOrEqual(4);
+    expect(budget.totalAmount).toBeGreaterThanOrEqual(
+      budget.budgetCategories.reduce((sum, category) => sum + category.amount, 0),
+    );
+
+    const summary = createTransactionsSummary(prisma);
+    const spending = await summary.spendingInRange(result.userId, { from: '2026-10-01', to: '2026-10-31' });
+    const percents = budget.budgetCategories.map(
+      (category) => ((spending.byCategory[category.categoryId] ?? 0) / category.amount) * 100,
+    );
+    expect(percents.filter((percent) => percent >= 80 && percent <= 100)).toHaveLength(1);
+    expect(percents.filter((percent) => percent > 100)).toHaveLength(0);
+
+    const notifications = await prisma.notification.findMany({ where: { userId: result.userId } });
+    expect(notifications.map((notification) => notification.status).sort()).toEqual(['failed', 'read', 'sent']);
+    expect(notifications.every((notification) => notification.channel === 'whatsapp')).toBe(true);
+    expect(notifications.find((notification) => notification.status === 'failed')?.sentAt).toBeNull();
 
     const accounts = await prisma.account.findMany({ where: { userId: result.userId }, orderBy: { name: 'asc' } });
     expect(accounts.map((a) => [a.name, a.type, a.isDefault])).toEqual([
@@ -77,13 +112,17 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
   it('idempoten: dijalankan dua kali tidak menggandakan data', async () => {
     const first = await seedDemo(prisma, provider, { ...options, reset: false });
     const before = await counts(first.userId);
+    const beforeExtras = await extras(first.userId);
 
     const second = await seedDemo(prisma, provider, { ...options, reset: false });
 
     expect(second.userId).toBe(first.userId);
     expect(second.seededTransactions).toBe(false);
     expect(second.existingTransactions).toBe(dataset.transactions.length);
+    expect(second.budgetCreated).toBe(false);
+    expect(second.notificationsCreated).toBe(0);
     expect(await counts(first.userId)).toEqual(before);
+    expect(await extras(first.userId)).toEqual(beforeExtras);
     expect(await prisma.user.count()).toBe(1);
   });
 
@@ -131,18 +170,37 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
       },
     });
     await prisma.account.create({ data: { userId: first.userId, name: 'GoPay', type: 'ewallet' } });
+    await prisma.notification.create({
+      data: {
+        userId: first.userId,
+        type: 'daily_summary',
+        channel: 'whatsapp',
+        title: 'latihan',
+        body: 'latihan',
+        payload: { date: '2000-01-01' },
+        status: 'pending',
+      },
+    });
 
     const second = await seedDemo(prisma, provider, { ...options, reset: true });
 
     expect(second.userId).toBe(first.userId);
     expect(second.seededTransactions).toBe(true);
+    expect(second.budgetCreated).toBe(true);
+    expect(second.notificationsCreated).toBe(3);
     expect(await prisma.transaction.count({ where: { userId: first.userId, description: 'tambahan demo' } })).toBe(0);
+    expect(await prisma.notification.count({ where: { userId: first.userId, title: 'latihan' } })).toBe(0);
     expect(await counts(first.userId)).toEqual({
       transactions: dataset.transactions.length,
       deleted: expectedDeleted,
       messages: expectedMessages,
-      audits: dataset.transactions.length + expectedDeleted,
+      audits: dataset.transactions.length + expectedDeleted + 1,
       accounts: 2,
+    });
+    expect(await extras(first.userId)).toMatchObject({
+      budgets: 1,
+      notifications: 3,
+      budgetAudits: 1,
     });
   });
 
@@ -155,11 +213,23 @@ describe.skipIf(!testDbUrl)('seed pengguna demo (integrasi, Postgres test)', () 
     await prisma.transaction.create({
       data: { userId: identity.id, accountId: account.id, categoryId: category.id, type: 'expense', amount: 5000, occurredAt: NOW, source: 'manual' },
     });
+    await prisma.notification.create({
+      data: {
+        userId: identity.id,
+        type: 'daily_summary',
+        channel: 'whatsapp',
+        title: 'milik orang lain',
+        body: 'jangan dihapus',
+        payload: { date: '2026-10-02' },
+        status: 'sent',
+      },
+    });
 
     await seedDemo(prisma, provider, { ...options, reset: true });
 
     expect(await prisma.transaction.count({ where: { userId: identity.id } })).toBe(1);
     expect(await prisma.account.count({ where: { userId: identity.id } })).toBe(1);
+    expect(await prisma.notification.count({ where: { userId: identity.id } })).toBe(1);
   });
 
   describe('reset dan tautan WhatsApp', () => {

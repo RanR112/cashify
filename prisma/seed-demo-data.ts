@@ -15,7 +15,18 @@
 //  - Belanja lebih sering di minggu gajian; satu pembelian besar di bulan tengah.
 //  - Total pengeluaran sekitar Rp4-5 juta/bulan terhadap pemasukan Rp7 juta.
 
-import { addDays, isValidDateString, jakartaDayStartUtc } from '../src/shared/utils/timezone.js';
+import {
+  BUDGET_ALERT_TITLE,
+  budgetAlert,
+  DAILY_SUMMARY_TITLE,
+  dailySummary,
+} from '../src/modules/notifications/notifications.templates.js';
+import {
+  addDays,
+  isValidDateString,
+  jakartaDayStartUtc,
+  monthBounds,
+} from '../src/shared/utils/timezone.js';
 
 export const DEMO_EMAIL = 'demo@cashify.test';
 export const DEMO_PASSWORD = 'Demo-Cashify-2026';
@@ -429,4 +440,212 @@ export function buildDemoDataset(today: string): DemoDataset {
   });
 
   return { startDate, endDate: today, transactions };
+}
+
+// ---- anggaran dan riwayat notifikasi ----
+//
+// Keduanya dirakit dari data yang SUDAH ada di database (bukan dari dataset transaksi),
+// supaya persentase anggaran benar-benar cocok dengan baris yang dilihat pengguna demo.
+// Fungsi di bawah tetap murni: Prisma dan jam sistem tidak dikenal di sini.
+
+export interface DemoCategorySpend {
+  categoryId: string;
+  name: string;
+  slug: string;
+  /** Total pengeluaran kategori dalam rentang, rupiah penuh. */
+  total: number;
+}
+
+export interface DemoBudgetCategorySpec {
+  categoryId: string;
+  name: string;
+  slug: string;
+  amount: number;
+  alertThreshold: number;
+}
+
+export interface DemoBudgetSpec {
+  name: string;
+  /** `YYYY-MM-DD`, tanggal 1 bulan berjalan. */
+  periodStart: string;
+  /** `YYYY-MM-DD`, akhir bulan berjalan. */
+  periodEnd: string;
+  totalAmount: number;
+  autoRenew: boolean;
+  rolloverEnabled: boolean;
+  categories: DemoBudgetCategorySpec[];
+  /** Kategori yang sengaja melewati ambang; null bila bulan ini belum ada pengeluaran. */
+  alertCategoryId: string | null;
+  /** Pengeluaran kategori alert bulan berjalan. */
+  alertSpent: number;
+}
+
+const MONTH_NAMES = [
+  'Januari',
+  'Februari',
+  'Maret',
+  'April',
+  'Mei',
+  'Juni',
+  'Juli',
+  'Agustus',
+  'September',
+  'Oktober',
+  'November',
+  'Desember',
+] as const;
+
+const roundUpTo = (value: number, step: number): number => Math.ceil(value / step) * step;
+
+const byTotalDesc = (a: DemoCategorySpend, b: DemoCategorySpend): number =>
+  b.total - a.total || a.name.localeCompare(b.name);
+
+/**
+ * Anggaran bulan berjalan dengan 3-4 kategori pengeluaran.
+ *
+ * Kategori alert memakai alokasi `spend / 0.9`, jadi persentase terpakai 90-100% dan
+ * statusnya `warning` (ambang 80). Kategori lain memakai `spend / 0.5` dengan lantai
+ * Rp100.000, jadi statusnya `ok`. Bila bulan berjalan belum punya pengeluaran, kategori
+ * diambil dari 60 hari terakhir dan tidak ada yang melewati ambang.
+ */
+export function buildDemoBudget(
+  today: string,
+  input: { currentMonth: readonly DemoCategorySpend[]; recent: readonly DemoCategorySpend[] },
+): DemoBudgetSpec | null {
+  if (!isValidDateString(today)) throw new RangeError(`Bukan tanggal YYYY-MM-DD yang sah: ${today}`);
+
+  const { from, to } = monthBounds(today.slice(0, 7));
+  const current = input.currentMonth.filter((category) => category.total > 0).sort(byTotalDesc);
+  const recent = input.recent.filter((category) => category.total > 0).sort(byTotalDesc);
+  const alert = current[0] ?? null;
+
+  // Kategori alert lebih dulu, lalu kategori yang paling sering dipakai 60 hari terakhir.
+  const selected = new Map<string, DemoCategorySpend>();
+  if (alert) selected.set(alert.categoryId, alert);
+  for (const category of recent) {
+    if (selected.size >= 4) break;
+    selected.set(category.categoryId, category);
+  }
+  if (selected.size === 0) return null;
+
+  const currentById = new Map(current.map((category) => [category.categoryId, category.total]));
+  const categories = [...selected.values()].map((category): DemoBudgetCategorySpec => {
+    const spent = currentById.get(category.categoryId) ?? 0;
+    const isAlert = alert?.categoryId === category.categoryId && spent > 0;
+    return {
+      categoryId: category.categoryId,
+      name: category.name,
+      slug: category.slug,
+      // Pembulatan Rp100 aman untuk kategori biasa; kategori alert dibulatkan ke rupiah
+      // penuh agar persentasenya tidak jatuh di bawah ambang hanya karena pembulatan.
+      amount: isAlert ? Math.max(1, Math.ceil(spent / 0.9)) : Math.max(100_000, roundUpTo(spent / 0.5, 100)),
+      alertThreshold: 80,
+    };
+  });
+
+  const [year = '', month = ''] = today.split('-');
+  const monthName = MONTH_NAMES[Number(month) - 1] ?? month;
+  const totalAmount = roundUpTo(
+    categories.reduce((sum, category) => sum + category.amount, 0) + 500_000,
+    100_000,
+  );
+
+  return {
+    name: `Anggaran ${monthName} ${year}`,
+    periodStart: from,
+    periodEnd: to,
+    totalAmount,
+    autoRenew: true,
+    rolloverEnabled: false,
+    categories,
+    alertCategoryId: alert?.categoryId ?? null,
+    alertSpent: alert?.total ?? 0,
+  };
+}
+
+export interface DemoDailyStat {
+  /** `YYYY-MM-DD`. */
+  date: string;
+  income: number;
+  expense: number;
+  topExpenseCategory: { name: string; total: number } | null;
+}
+
+export type DemoNotificationPayload = { date: string } | { budget_id: string; category_id: string };
+
+export interface DemoNotificationSpec {
+  type: 'daily_summary' | 'budget_alert';
+  title: string;
+  body: string;
+  payload: DemoNotificationPayload;
+  status: 'sent' | 'failed' | 'read';
+  scheduledFor: Date | null;
+  sentAt: Date | null;
+  createdAt: Date;
+}
+
+export interface DemoNotificationInput {
+  /** Hari-hari yang punya transaksi, terbaru dulu; hanya tanggal sebelum hari ini. */
+  dailyStats: readonly DemoDailyStat[];
+  budget: DemoBudgetSpec | null;
+  /** Id baris `budgets` setelah tersimpan; null bila anggaran belum ada. */
+  budgetId: string | null;
+}
+
+const atJakarta = (date: string, hour: number, minute: number): Date =>
+  new Date(jakartaDayStartUtc(date).getTime() + (hour * 60 + minute) * 60_000);
+
+/**
+ * Tiga baris riwayat: ringkasan `sent`, ringkasan `failed`, dan peringatan anggaran `read`.
+ * Status `read` tidak punya kolom waktunya sendiri; `sent_at` tetap diisi seperti produksi.
+ */
+export function buildDemoNotifications(today: string, input: DemoNotificationInput): DemoNotificationSpec[] {
+  if (!isValidDateString(today)) throw new RangeError(`Bukan tanggal YYYY-MM-DD yang sah: ${today}`);
+
+  const stats = input.dailyStats
+    .filter((stat) => stat.date < today && (stat.income > 0 || stat.expense > 0))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, 2);
+
+  const specs: DemoNotificationSpec[] = [];
+  const dailyAt = (stat: DemoDailyStat, status: 'sent' | 'failed'): DemoNotificationSpec => {
+    const createdAt = atJakarta(stat.date, 20, 5);
+    return {
+      type: 'daily_summary',
+      title: DAILY_SUMMARY_TITLE,
+      body: dailySummary(stat),
+      payload: { date: stat.date },
+      status,
+      scheduledFor: createdAt,
+      sentAt: status === 'sent' ? new Date(createdAt.getTime() + 2 * 60_000) : null,
+      createdAt,
+    };
+  };
+
+  const [newest, older] = stats;
+  if (newest) specs.push(dailyAt(newest, 'sent'));
+  if (older) specs.push(dailyAt(older, 'failed'));
+
+  const budget = input.budget;
+  const category = budget?.categories.find((row) => row.categoryId === budget.alertCategoryId);
+  if (budget && input.budgetId && category && budget.alertSpent > 0) {
+    const createdAt = atJakarta(newest?.date ?? addDays(today, -1), 9, 15);
+    specs.push({
+      type: 'budget_alert',
+      title: BUDGET_ALERT_TITLE,
+      body: budgetAlert({
+        budgetName: budget.name,
+        categoryName: category.name,
+        spent: budget.alertSpent,
+        amount: category.amount,
+      }),
+      payload: { budget_id: input.budgetId, category_id: category.categoryId },
+      status: 'read',
+      scheduledFor: null,
+      sentAt: new Date(createdAt.getTime() + 60_000),
+      createdAt,
+    });
+  }
+
+  return specs;
 }
