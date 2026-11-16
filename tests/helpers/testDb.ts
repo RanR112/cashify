@@ -24,6 +24,9 @@ export function createTestPrisma(url: string): PrismaClient {
 
 /** Menghapus semua data pengguna. Menghapus auth.users ikut menghapus users, accounts, dan kategori pengguna (CASCADE). */
 export async function resetUserData(prisma: PrismaClient): Promise<void> {
+  // budget_categories.category_id -> categories ON DELETE RESTRICT, sehingga kategori pengguna
+  // tidak bisa ikut terhapus selama anggaran masih ada. Hapus anggaran lebih dulu.
+  await prisma.budget.deleteMany();
   await prisma.$executeRaw`DELETE FROM auth.users`;
   await prisma.user.deleteMany();
 }

@@ -1,0 +1,339 @@
+# Koleksi REST — Anggaran
+#
+# Salin session.access_token dari respons login (auth.http) ke @token.
+# Urutan yang disarankan, karena request memakai id dari respons sebelumnya:
+#   1. "expenseCats"  (ambil dua category_id pengeluaran)
+#   2. "createBudget" (buat anggaran bulan ini)
+#   3. request lain bebas urutan; "deleteBudget" harus terakhir bila ingin membuat
+#      anggaran baru untuk periode yang sama.
+#
+# Satu pengguna hanya boleh punya satu anggaran aktif per periode: periode yang beririsan
+# (termasuk monthly vs weekly) dijawab 409 CONFLICT. Hapus anggaran lama untuk membebaskan
+# periodenya. `period_start` dinormalkan server: monthly ke tanggal 1, weekly ke Senin.
+
+@baseUrl = http://localhost:3000
+@token = GANTI_DENGAN_ACCESS_TOKEN_DARI_LOGIN
+
+### ============================================================
+### Persiapan: id kategori pengeluaran
+### ============================================================
+
+# @name expenseCats
+GET {{baseUrl}}/categories?type=expense
+Authorization: Bearer {{token}}
+
+###
+
+# @name incomeCats
+GET {{baseUrl}}/categories?type=income
+Authorization: Bearer {{token}}
+
+### ============================================================
+### POST /budgets
+### ============================================================
+
+# Sukses: 201 Budget. period_end dihitung server (akhir bulan); alert_threshold bawaan 80.
+# @name createBudget
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Anggaran bulan ini",
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 3000000,
+  "auto_renew": true,
+  "rollover_enabled": false,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 2000000,
+      "alert_threshold": 80
+    },
+    {
+      "category_id": "{{expenseCats.response.body.$.data[1].id}}",
+      "amount": 1000000
+    }
+  ]
+}
+
+### Sukses: anggaran mingguan (periode dinormalkan ke Senin–Minggu).
+### Jalankan sebelum "createBudget" atau setelah anggaran bulanan dihapus; jika tidak,
+### periode beririsan dan dijawab 409.
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "weekly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 500000,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 500000
+    }
+  ]
+}
+
+### Error 409: periode bulan ini sudah punya anggaran (jalankan setelah "createBudget")
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 1000000,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 1000000
+    }
+  ]
+}
+
+### Error 400: total_amount nol
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 0,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 1000
+    }
+  ]
+}
+
+### Error 400: jumlah alokasi melebihi total_amount
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 1000000,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 1500000
+    }
+  ]
+}
+
+### Error 400: kategori ganda
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 1000000,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 400000
+    },
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 600000
+    }
+  ]
+}
+
+### Error 400: categories kosong
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 1000000,
+  "categories": []
+}
+
+### Error 400: kategori pemasukan tidak boleh dipakai untuk anggaran
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 1000000,
+  "categories": [
+    {
+      "category_id": "{{incomeCats.response.body.$.data[0].id}}",
+      "amount": 1000000
+    }
+  ]
+}
+
+### Error 404: kategori tidak ditemukan
+POST {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "{{$localDatetime "YYYY-MM-DD"}}",
+  "total_amount": 1000000,
+  "categories": [
+    {
+      "category_id": "00000000-0000-4000-8000-000000000000",
+      "amount": 1000000
+    }
+  ]
+}
+
+### Error 401: tanpa token
+POST {{baseUrl}}/budgets
+Content-Type: application/json
+
+{
+  "period_type": "monthly",
+  "period_start": "2026-11-01",
+  "total_amount": 1000000,
+  "categories": []
+}
+
+### ============================================================
+### GET /budgets
+### ============================================================
+
+# Sukses: 200 {data[]}, urut period_start menurun; bawaan status=all (termasuk riwayat).
+GET {{baseUrl}}/budgets
+Authorization: Bearer {{token}}
+
+### Sukses: hanya anggaran yang periodenya memuat hari ini (Asia/Jakarta)
+GET {{baseUrl}}/budgets?status=active
+Authorization: Bearer {{token}}
+
+### Error 400: status tak dikenal
+GET {{baseUrl}}/budgets?status=deleted
+Authorization: Bearer {{token}}
+
+### Error 401: tanpa token
+GET {{baseUrl}}/budgets
+
+### ============================================================
+### GET /budgets/current
+### ============================================================
+
+# Sukses: 200 BudgetDetail anggaran aktif beserta progresnya.
+# Error 404 bila tidak ada anggaran yang periodenya memuat hari ini.
+GET {{baseUrl}}/budgets/current
+Authorization: Bearer {{token}}
+
+### ============================================================
+### GET /budgets/:id
+### ============================================================
+
+# Sukses: 200 BudgetDetail. spent_total mencakup seluruh pengeluaran periode, termasuk
+# kategori yang tidak dialokasikan; spent per kategori hanya untuk kategori teralokasi.
+GET {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: id tidak ada atau milik pengguna lain
+GET {{baseUrl}}/budgets/00000000-0000-4000-8000-000000000000
+Authorization: Bearer {{token}}
+
+### Error 400: id bukan UUID
+GET {{baseUrl}}/budgets/bukan-uuid
+Authorization: Bearer {{token}}
+
+### ============================================================
+### PATCH /budgets/:id
+### ============================================================
+
+# Sukses: 200 Budget. Field periode tidak boleh diubah; minimal satu field.
+# categories bersifat upsert per category_id dan menghapus yang tidak dikirim.
+# alert_threshold yang tidak dikirim mempertahankan nilai lama (baris baru: 80).
+# @name patchBudget
+PATCH {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Anggaran revisi",
+  "total_amount": 3500000,
+  "categories": [
+    {
+      "category_id": "{{expenseCats.response.body.$.data[0].id}}",
+      "amount": 2500000
+    }
+  ]
+}
+
+### Sukses: hanya mengubah satu field
+PATCH {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "rollover_enabled": true
+}
+
+### Error 400: period_start tidak boleh diubah
+PATCH {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "period_start": "2026-01-01"
+}
+
+### Error 400: body kosong
+PATCH {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{}
+
+### Error 400: total_amount di bawah jumlah alokasi yang ada
+PATCH {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "total_amount": 100000
+}
+
+### Error 404: id tidak ada atau milik pengguna lain
+PATCH {{baseUrl}}/budgets/00000000-0000-4000-8000-000000000000
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Tidak ada"
+}
+
+### ============================================================
+### DELETE /budgets/:id  (soft delete)
+### ============================================================
+
+# Sukses: 204. Anggaran hilang dari daftar dan periodenya bebas dipakai lagi.
+# @name deleteBudget
+DELETE {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: sudah dihapus (jalankan dua kali) atau id tidak ada
+DELETE {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 404: anggaran yang sudah dihapus tidak bisa dibaca
+GET {{baseUrl}}/budgets/{{createBudget.response.body.$.id}}
+Authorization: Bearer {{token}}
+
+### Error 400: id bukan UUID
+DELETE {{baseUrl}}/budgets/bukan-uuid
+Authorization: Bearer {{token}}
