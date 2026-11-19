@@ -102,6 +102,7 @@ export const transactionSchema = z
     source: transactionSourceSchema,
     category: categorySummarySchema,
     account: accountSummarySchema,
+    occured_at: timestampSchema,
     created_at: timestampSchema,
     updated_at: timestampSchema.openapi({ description: 'Kirim kembali pada PATCH sebagai penjaga konflik.' }),
   })

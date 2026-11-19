@@ -33,6 +33,7 @@ export function toTransactionBody(record: TransactionRecord): TransactionBody {
       color: record.category.color,
     },
     account: { id: record.account.id, name: record.account.name },
+    occured_at: record.occurredAt.toISOString(),
     created_at: record.createdAt.toISOString(),
     updated_at: record.updatedAt.toISOString(),
   };
